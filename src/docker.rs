@@ -106,14 +106,29 @@ impl DockerClient {
         cmd.arg("-e").arg(format!("UID={}", Self::get_uid()));
         cmd.arg("-e").arg(format!("GID={}", Self::get_gid()));
 
-        // Volume mounts
+        // Always mount the directory containing claudepod.toml to the same path in container
+        let project_dir = std::env::current_dir()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to get current directory: {}", e)))?;
+        let project_dir_str = project_dir.to_string_lossy();
+        cmd.arg("-v").arg(format!("{}:{}", project_dir_str, project_dir_str));
+
+        // Set working directory to the project directory
+        cmd.arg("-w").arg(project_dir_str.as_ref());
+
+        // Mount additional volumes from config (except PWD which is already mounted)
         for volume in &config.docker.volumes {
+            // Skip if this is the PWD mount since we already handle it above
+            if volume.host == "$PWD" {
+                continue;
+            }
+
             let host_path = shellexpand::full(&volume.host)
                 .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
-            let volume_path = shellexpand::full(&volume.container)
+
+            let container_path = shellexpand::full(&volume.container)
                 .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
 
-            let mut mount_arg = format!("{}:{}", host_path, volume_path);
+            let mut mount_arg = format!("{}:{}", host_path, container_path);
             if volume.readonly {
                 mount_arg.push_str(":ro");
             }

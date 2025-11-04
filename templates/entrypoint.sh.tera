@@ -72,7 +72,7 @@ pip3 install --no-cache-dir {{ pip_packages | join(sep=" ") }}
 
 echo "Ready."
 
-cd {{ work_dir }}
+# Working directory is already set by docker run -w flag, don't change it
 
 # Execute command with environment sourced
 exec bash -c "source {{ home_dir }}/.env && \"\$@\"" -- "$@"

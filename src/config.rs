@@ -187,7 +187,7 @@ fn default_home_dir() -> String {
 }
 
 fn default_work_dir() -> String {
-    "/home/code/work".to_string()
+    "$PWD".to_string()
 }
 
 fn default_true() -> bool {
@@ -272,7 +272,7 @@ impl Default for DockerConfig {
             volumes: vec![
                 VolumeMount {
                     host: "$PWD".to_string(),
-                    container: "/home/code/work".to_string(),
+                    container: "$PWD".to_string(),
                     readonly: false,
                 },
                 VolumeMount {
@@ -287,7 +287,7 @@ impl Default for DockerConfig {
                 },
             ],
             tmpfs: vec![TmpfsMount {
-                path: "/home/code/work/build".to_string(),
+                path: "/workspace/build".to_string(),
                 readonly: true,
                 size: "1m".to_string(),
             }],

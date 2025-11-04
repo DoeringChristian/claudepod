@@ -71,8 +71,5 @@ USER {{ user }}
 ENV HOME={{ home_dir }}
 ENV PATH="{{ home_dir }}/.npm-global/bin:${PATH}"
 
-# Set working directory
-WORKDIR {{ work_dir }}
-
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

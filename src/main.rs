@@ -134,14 +134,21 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
     let generator = Generator::new()?;
     generator.generate(&config, &build_dir)?;
 
+    // Compute config hash for image tag
+    let config_hash = LockFile::compute_config_hash(&config)?;
+    let short_hash = &config_hash[..12]; // Use first 12 chars like Docker
+    let image_tag = format!("claudepod:{}", short_hash);
+
+    println!("Using image tag: {}", image_tag);
+
     // Build container image
-    let image_tag = "claudepod:latest";
     let runtime = &config.docker.container_runtime;
-    let image_id = DockerClient::build(&build_dir, image_tag, runtime)?;
+    let image_id = DockerClient::build(&build_dir, &image_tag, runtime)?;
 
     // Update lock file
     if !no_lock {
         let mut lock = LockFile::new(&config)?;
+        lock.image_tag = image_tag;
         lock.set_image_id(image_id);
         LockManager::save(&lock)?;
         println!("Updated lock file: {}", LockManager::default_path());
@@ -161,7 +168,10 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
         let (needs_rebuild, reason) = LockManager::needs_rebuild(&config)?;
 
         if needs_rebuild {
-            println!("⚠ {}", reason.unwrap_or_else(|| "Rebuild needed".to_string()));
+            println!(
+                "⚠ {}",
+                reason.unwrap_or_else(|| "Rebuild needed".to_string())
+            );
             println!("Building container image automatically...\n");
 
             // Run build automatically
