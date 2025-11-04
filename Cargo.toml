@@ -1,0 +1,46 @@
+[package]
+name = "claudepod"
+version = "0.1.0"
+edition = "2021"
+authors = ["Claude Code"]
+description = "CLI tool for managing Claude Code Docker instances with declarative TOML configuration"
+
+[[bin]]
+name = "claudepod"
+path = "src/main.rs"
+
+[dependencies]
+# Config parsing
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# CLI framework
+clap = { version = "4.5", features = ["derive"] }
+
+# Templating
+tera = "1.20"
+
+# Hashing for lock file
+sha2 = "0.10"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# JSON for lock file
+serde_json = "1.0"
+
+# File operations
+walkdir = "2.5"
+
+# Date/time for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Shell expansion for paths
+shellexpand = "3.1"
+
+# Unix system calls
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.10"

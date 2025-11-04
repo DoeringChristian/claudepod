@@ -1,0 +1,61 @@
+# Minimal claudepod configuration example
+# A lightweight Python development environment
+
+[container]
+base_image = "docker.io/ubuntu:22.04"
+user = "code"
+home_dir = "/home/code"
+work_dir = "/home/code/work"
+
+[docker]
+container_runtime = "podman"
+enable_gpu = false
+interactive = true
+remove_on_exit = true
+
+[[docker.volumes]]
+host = "$PWD"
+container = "/home/code/work"
+readonly = false
+
+[[docker.volumes]]
+host = "$HOME/.claude"
+container = "/home/code/.claude"
+readonly = false
+
+[environment]
+TERM = "xterm-256color"
+
+[claude]
+install_at_startup = true
+skip_permissions = false
+max_turns = 99999999
+
+[dependencies.apt]
+python = ["python3", "python3-pip"]
+build_tools = []
+cpp_toolchain = []
+debugging = []
+utilities = ["git", "curl", "vim", "gosu", "sudo"]
+custom = []
+
+[dependencies.nodejs]
+enabled = true
+version = "18"
+source = "nodesource"
+
+[dependencies.github_cli]
+enabled = false
+
+[dependencies]
+pip = []
+npm = []
+
+[gpu]
+copy_host_drivers = false
+
+[shell]
+history_search = true
+
+[shell.aliases]
+gs = "git status"

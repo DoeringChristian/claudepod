@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# Create group and user
+groupadd -g ${GID} {{ user }} 2>/dev/null
+useradd -m -s /bin/bash -u ${UID} -g ${GID} {{ user }} 2>/dev/null
+ln -s /usr/bin/python3 /usr/bin/python
+
+cp /etc/skel/.bashrc {{ home_dir }}/.bashrc
+
+# Create environment file
+cat >{{ home_dir }}/.env <<'EOF'
+export PATH="{{ home_dir }}/.npm-global/bin:$PATH"
+{%- for key, value in environment %}
+export {{ key }}={{ value }}
+{%- endfor %}
+{%- for alias_name, alias_cmd in aliases %}
+alias {{ alias_name }}={{ alias_cmd }}
+{%- endfor %}
+EOF
+
+{%- if git_user_name or git_user_email %}
+
+# Create git config
+cat >{{ home_dir }}/.gitconfig <<'EOF'
+[user]
+{%- if git_user_email %}
+    email = {{ git_user_email }}
+{%- endif %}
+{%- if git_user_name %}
+    name = {{ git_user_name }}
+{%- endif %}
+[alias]
+    co = checkout
+EOF
+{%- endif %}
+
+{%- if history_search %}
+
+# Setup readline history search
+cat >{{ home_dir }}/.inputrc <<'EOF'
+$include /etc/inputrc
+"\e[A":history-search-backward
+"\e[B":history-search-forward
+EOF
+{%- endif %}
+
+# Source it in .bashrc for interactive shells
+echo 'source ~/.env' >>{{ home_dir }}/.bashrc
+
+# Fix ownership
+chown {{ user }}:{{ user }} {{ home_dir }} {{ home_dir }}/.env {{ home_dir }}/.bashrc
+{%- if git_user_name or git_user_email %}
+chown {{ user }}:{{ user }} {{ home_dir }}/.gitconfig
+{%- endif %}
+{%- if history_search %}
+chown {{ user }}:{{ user }} {{ home_dir }}/.inputrc
+{%- endif %}
+
+{%- if install_claude %}
+
+echo "Setting up @anthropic-ai/claude-code..."
+gosu {{ user }} bash -c '
+    mkdir -p ~/.npm-global
+    npm config set prefix ~/.npm-global
+    npm install --silent -g @anthropic-ai/claude-code
+'
+{%- endif %}
+
+{%- if npm_packages %}
+
+echo "Installing additional npm packages..."
+gosu {{ user }} bash -c 'npm install --silent -g {{ npm_packages | join(sep=" ") }}'
+{%- endif %}
+
+{%- if pip_packages %}
+
+echo "Installing pip packages..."
+pip3 install --no-cache-dir {{ pip_packages | join(sep=" ") }}
+{%- endif %}
+
+echo "Ready."
+
+cd {{ work_dir }}
+
+# Source the env file before running command
+exec gosu {{ user }} bash -c "source {{ home_dir }}/.env && $*"

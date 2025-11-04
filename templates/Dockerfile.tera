@@ -1,0 +1,55 @@
+FROM {{ base_image }}
+
+# Install required packages
+RUN apt-get update && apt-get install -y \
+{%- for package in apt_packages %}
+    {{ package }} \
+{%- endfor %}
+    && rm -rf /var/lib/apt/lists/*
+
+{%- if copy_host_drivers %}
+
+# Copy GPU drivers from host
+COPY driver /
+{%- endif %}
+
+{%- if fd_find_symlink %}
+
+# Create symlink for fd-find to fd for easier use
+RUN ln -s $(which fdfind) /usr/local/bin/fd
+{%- endif %}
+
+{%- if nodejs_enabled %}
+
+# Install Node.js {{ nodejs_version }} using the NodeSource setup script
+RUN curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_version }}.x | bash - && \
+    apt-get update && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+{%- endif %}
+
+{%- if github_cli_enabled %}
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && apt-get update \
+  && apt-get install -y gh \
+  && rm -rf /var/lib/apt/lists/*
+{%- endif %}
+
+{%- for custom in custom_dependencies %}
+
+# Custom dependency: {{ custom.name }}
+{%- for command in custom.commands %}
+RUN {{ command }}
+{%- endfor %}
+{%- endfor %}
+
+# Copy and setup entrypoint script
+COPY entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
