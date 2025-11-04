@@ -23,7 +23,11 @@ const BUILD_DIR: &str = ".claudepod";
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Arguments to pass to the container/Claude (when no subcommand specified)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -76,10 +80,14 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { force } => cmd_init(force),
-        Commands::Build { force, no_lock } => cmd_build(force, no_lock),
-        Commands::Run { args, skip_check } => cmd_run(args, skip_check),
-        Commands::Check { verbose } => cmd_check(verbose),
+        Some(Commands::Init { force }) => cmd_init(force),
+        Some(Commands::Build { force, no_lock }) => cmd_build(force, no_lock),
+        Some(Commands::Run { args, skip_check }) => cmd_run(args, skip_check),
+        Some(Commands::Check { verbose }) => cmd_check(verbose),
+        None => {
+            // Default to running claudepod with args from top-level
+            cmd_run(cli.args, false)
+        }
     }
 }
 
@@ -109,7 +117,7 @@ fn cmd_init(force: bool) -> Result<()> {
 
 fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
     // Load configuration
-    let config = load_config()?;
+    let (config, _config_dir) = load_config()?;
 
     // Check if rebuild is needed (unless force)
     if !force {
@@ -161,7 +169,7 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
 
 fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Load configuration
-    let config = load_config()?;
+    let (config, config_dir) = load_config()?;
 
     // Check if rebuild is needed
     if !skip_check {
@@ -196,7 +204,9 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     }
 
     // Run the container
-    DockerClient::run(&config, &lock, &args)?;
+    let current_dir = std::env::current_dir()
+        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
+    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir)?;
 
     Ok(())
 }
@@ -205,17 +215,19 @@ fn cmd_check(verbose: bool) -> Result<()> {
     println!("Checking claudepod configuration...\n");
 
     // Check if config file exists
-    let config_path = Path::new(CONFIG_FILE);
-    if !config_path.exists() {
-        println!("❌ Configuration file not found: {}", CONFIG_FILE);
-        println!("   Run 'claudepod init' to create one.");
-        return Ok(());
-    }
-    println!("✓ Configuration file: {}", CONFIG_FILE);
+    let config_path = match find_config_file() {
+        Ok(path) => path,
+        Err(_) => {
+            println!("❌ Configuration file not found: {}", CONFIG_FILE);
+            println!("   Run 'claudepod init' to create one.");
+            return Ok(());
+        }
+    };
+    println!("✓ Configuration file: {}", config_path.display());
 
     // Load and validate config
     let config = match load_config() {
-        Ok(c) => {
+        Ok((c, _)) => {
             println!("✓ Configuration is valid");
             c
         }
@@ -306,13 +318,35 @@ fn cmd_check(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_config() -> Result<ClaudepodConfig> {
-    let config_path = Path::new(CONFIG_FILE);
-    if !config_path.exists() {
-        return Err(ClaudepodError::FileNotFound(format!(
-            "{} not found. Run 'claudepod init' to create it.",
-            CONFIG_FILE
-        )));
+fn find_config_file() -> Result<PathBuf> {
+    let mut current_dir = std::env::current_dir()
+        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
+
+    loop {
+        let config_path = current_dir.join(CONFIG_FILE);
+        if config_path.exists() {
+            return Ok(config_path);
+        }
+
+        // Try to move to parent directory
+        if !current_dir.pop() {
+            // Reached the root directory
+            break;
+        }
     }
-    ClaudepodConfig::from_file(config_path)
+
+    Err(ClaudepodError::FileNotFound(format!(
+        "{} not found in current directory or any parent directory. Run 'claudepod init' to create it.",
+        CONFIG_FILE
+    )))
+}
+
+fn load_config() -> Result<(ClaudepodConfig, PathBuf)> {
+    let config_path = find_config_file()?;
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| ClaudepodError::Other("Failed to get config directory".to_string()))?
+        .to_path_buf();
+    let config = ClaudepodConfig::from_file(&config_path)?;
+    Ok((config, config_dir))
 }

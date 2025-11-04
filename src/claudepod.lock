@@ -1,0 +1,11 @@
+{
+  "config_hash": "86a03c98bd273bc13d6d76a81f1b7ee482693f6cebd54803763104ad92087d36",
+  "created_at": "2025-11-04T15:54:09.633554873Z",
+  "image_id": "bb5e18204436",
+  "image_tag": "claudepod:86a03c98bd27",
+  "resolved_versions": {
+    "apt": [],
+    "pip": [],
+    "npm": []
+  }
+}

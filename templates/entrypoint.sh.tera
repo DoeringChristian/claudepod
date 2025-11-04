@@ -49,27 +49,6 @@ EOF
 # Source it in .bashrc for interactive shells
 echo 'source ~/.env' >>{{ home_dir }}/.bashrc
 
-{%- if install_claude %}
-
-# Install Claude Code
-echo "Setting up @anthropic-ai/claude-code..."
-mkdir -p {{ home_dir }}/.npm-global
-npm config set prefix {{ home_dir }}/.npm-global
-npm install --silent -g @anthropic-ai/claude-code
-{%- endif %}
-
-{%- if npm_packages %}
-
-echo "Installing additional npm packages..."
-npm install --silent -g {{ npm_packages | join(sep=" ") }}
-{%- endif %}
-
-{%- if pip_packages %}
-
-echo "Installing pip packages..."
-pip3 install --no-cache-dir {{ pip_packages | join(sep=" ") }}
-{%- endif %}
-
 echo "Ready."
 
 # Working directory is already set by docker run -w flag, don't change it

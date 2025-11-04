@@ -13,11 +13,6 @@ remove_on_exit = true
 extra_args = []
 
 [[docker.volumes]]
-host = "$PWD"
-container = "$PWD"
-readonly = false
-
-[[docker.volumes]]
 host = "$HOME/.claude"
 container = "/home/code/.claude"
 readonly = false
