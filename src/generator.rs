@@ -67,14 +67,8 @@ impl Generator {
         context.insert("home_dir", &config.container.home_dir);
         context.insert("work_dir", &config.container.work_dir);
 
-        // Collect all apt packages
-        let mut apt_packages = Vec::new();
-        apt_packages.extend(config.dependencies.apt.python.clone());
-        apt_packages.extend(config.dependencies.apt.build_tools.clone());
-        apt_packages.extend(config.dependencies.apt.cpp_toolchain.clone());
-        apt_packages.extend(config.dependencies.apt.debugging.clone());
-        apt_packages.extend(config.dependencies.apt.utilities.clone());
-        apt_packages.extend(config.dependencies.apt.custom.clone());
+        // Use apt packages (already a single list)
+        let mut apt_packages = config.dependencies.apt.clone();
 
         // Remove duplicates and sort
         apt_packages.sort();
@@ -97,9 +91,6 @@ impl Generator {
 
         // Custom dependencies
         context.insert("custom_dependencies", &config.dependencies.custom);
-
-        // GPU drivers
-        context.insert("copy_host_drivers", &config.gpu.copy_host_drivers);
 
         // Environment variables
         context.insert("environment", &config.environment);

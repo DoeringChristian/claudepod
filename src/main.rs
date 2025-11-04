@@ -156,7 +156,22 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Load configuration
     let config = load_config()?;
 
-    // Load lock file
+    // Check if rebuild is needed
+    if !skip_check {
+        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config)?;
+
+        if needs_rebuild {
+            println!("⚠ {}", reason.unwrap_or_else(|| "Rebuild needed".to_string()));
+            println!("Building container image automatically...\n");
+
+            // Run build automatically
+            cmd_build(false, false)?;
+
+            println!();
+        }
+    }
+
+    // Load lock file (should exist now after potential rebuild)
     let lock = LockFile::from_file(LockManager::default_path()).map_err(|_| {
         ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
     })?;
@@ -168,13 +183,6 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
             "Container image '{}' not found. Run 'claudepod build' first.",
             lock.image_tag
         )));
-    }
-
-    // Check if rebuild is needed (unless skip_check)
-    if !skip_check {
-        if lock.is_config_changed(&config)? {
-            return Err(ClaudepodError::LockFileMismatch);
-        }
     }
 
     // Run the container

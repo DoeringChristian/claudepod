@@ -1,11 +1,13 @@
 #!/bin/bash
 
-# Create group and user
-groupadd -g ${GID} {{ user }} 2>/dev/null
-useradd -m -s /bin/bash -u ${UID} -g ${GID} {{ user }} 2>/dev/null
-ln -s /usr/bin/python3 /usr/bin/python
+# User is already created in Dockerfile, just ensure home directory exists
+mkdir -p {{ home_dir }}
 
-cp /etc/skel/.bashrc {{ home_dir }}/.bashrc
+# Create python symlink if needed
+[ -e /usr/bin/python ] || ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
+
+# Copy bashrc if needed
+[ -f {{ home_dir }}/.bashrc ] || cp /etc/skel/.bashrc {{ home_dir }}/.bashrc 2>/dev/null || true
 
 # Create environment file
 cat >{{ home_dir }}/.env <<'EOF'

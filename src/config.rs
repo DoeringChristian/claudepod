@@ -26,9 +26,6 @@ pub struct ClaudepodConfig {
     pub dependencies: DependenciesConfig,
 
     #[serde(default)]
-    pub gpu: GpuConfig,
-
-    #[serde(default)]
     pub shell: ShellConfig,
 }
 
@@ -120,8 +117,8 @@ pub struct ClaudeConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DependenciesConfig {
-    #[serde(default)]
-    pub apt: AptDependencies,
+    #[serde(default = "default_apt_packages")]
+    pub apt: Vec<String>,
 
     #[serde(default)]
     pub nodejs: NodeJsConfig,
@@ -137,27 +134,6 @@ pub struct DependenciesConfig {
 
     #[serde(default)]
     pub custom: Vec<CustomDependency>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AptDependencies {
-    #[serde(default = "default_python_packages")]
-    pub python: Vec<String>,
-
-    #[serde(default = "default_build_tools")]
-    pub build_tools: Vec<String>,
-
-    #[serde(default = "default_cpp_toolchain")]
-    pub cpp_toolchain: Vec<String>,
-
-    #[serde(default = "default_debugging")]
-    pub debugging: Vec<String>,
-
-    #[serde(default = "default_utilities")]
-    pub utilities: Vec<String>,
-
-    #[serde(default)]
-    pub custom: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -185,15 +161,6 @@ pub struct CustomDependency {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GpuConfig {
-    #[serde(default)]
-    pub copy_host_drivers: bool,
-
-    #[serde(default)]
-    pub driver_paths: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ShellConfig {
     #[serde(default)]
     pub aliases: HashMap<String, String>,
@@ -208,7 +175,7 @@ fn default_container_runtime() -> String {
 }
 
 fn default_base_image() -> String {
-    "nvidia/cuda:12.6.1-runtime-ubuntu25.04".to_string()
+    "ubuntu:25.04".to_string()
 }
 
 fn default_user() -> String {
@@ -247,41 +214,28 @@ fn default_nodejs_source() -> String {
     "nodesource".to_string()
 }
 
-fn default_python_packages() -> Vec<String> {
+fn default_apt_packages() -> Vec<String> {
     vec![
+        // Python ecosystem
         "python3".to_string(),
         "python3-pip".to_string(),
         "python3-dev".to_string(),
         "python3-dbg".to_string(),
         "python3-pytest".to_string(),
         "python3-numpy".to_string(),
-    ]
-}
-
-fn default_build_tools() -> Vec<String> {
-    vec![
+        // Build tools
         "build-essential".to_string(),
         "cmake".to_string(),
         "ninja-build".to_string(),
         "make".to_string(),
-    ]
-}
-
-fn default_cpp_toolchain() -> Vec<String> {
-    vec![
+        // C++ toolchain
         "clang-18".to_string(),
         "libc++abi-18-dev".to_string(),
         "libc++-18-dev".to_string(),
         "lldb-18".to_string(),
-    ]
-}
-
-fn default_debugging() -> Vec<String> {
-    vec!["gdb".to_string()]
-}
-
-fn default_utilities() -> Vec<String> {
-    vec![
+        // Debugging
+        "gdb".to_string(),
+        // Utilities
         "bsdmainutils".to_string(),
         "procps".to_string(),
         "jq".to_string(),
@@ -365,24 +319,11 @@ impl Default for ClaudeConfig {
 impl Default for DependenciesConfig {
     fn default() -> Self {
         Self {
-            apt: AptDependencies::default(),
+            apt: default_apt_packages(),
             nodejs: NodeJsConfig::default(),
             github_cli: GithubCliConfig::default(),
             pip: vec![],
             npm: vec![],
-            custom: vec![],
-        }
-    }
-}
-
-impl Default for AptDependencies {
-    fn default() -> Self {
-        Self {
-            python: default_python_packages(),
-            build_tools: default_build_tools(),
-            cpp_toolchain: default_cpp_toolchain(),
-            debugging: default_debugging(),
-            utilities: default_utilities(),
             custom: vec![],
         }
     }
@@ -401,15 +342,6 @@ impl Default for NodeJsConfig {
 impl Default for GithubCliConfig {
     fn default() -> Self {
         Self { enabled: true }
-    }
-}
-
-impl Default for GpuConfig {
-    fn default() -> Self {
-        Self {
-            copy_host_drivers: false,
-            driver_paths: vec![],
-        }
     }
 }
 
@@ -510,7 +442,6 @@ impl ClaudepodConfig {
             git: GitConfig::default(),
             claude: ClaudeConfig::default(),
             dependencies: DependenciesConfig::default(),
-            gpu: GpuConfig::default(),
             shell: ShellConfig::default(),
         }
     }

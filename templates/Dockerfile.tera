@@ -7,12 +7,6 @@ RUN apt-get update && apt-get install -y \
 {%- endfor %}
     && rm -rf /var/lib/apt/lists/*
 
-{%- if copy_host_drivers %}
-
-# Copy GPU drivers from host
-COPY driver /
-{%- endif %}
-
 {%- if fd_find_symlink %}
 
 # Create symlink for fd-find to fd for easier use
@@ -46,6 +40,22 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 RUN {{ command }}
 {%- endfor %}
 {%- endfor %}
+
+# Create non-root user with matching host UID/GID
+ARG USER_UID=1000
+ARG USER_GID=1000
+RUN if getent passwd $USER_UID > /dev/null 2>&1; then \
+        EXISTING_USER=$(getent passwd $USER_UID | cut -d: -f1); \
+        deluser $EXISTING_USER || true; \
+        delgroup $EXISTING_USER || true; \
+    fi && \
+    if getent group $USER_GID > /dev/null 2>&1; then \
+        GROUP_NAME=$(getent group $USER_GID | cut -d: -f1); \
+    else \
+        groupadd -g $USER_GID {{ user }} && GROUP_NAME={{ user }}; \
+    fi && \
+    useradd -m -s /bin/bash -u $USER_UID -g $GROUP_NAME {{ user }} && \
+    echo "{{ user }} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Copy and setup entrypoint script
 COPY entrypoint.sh /usr/local/bin/

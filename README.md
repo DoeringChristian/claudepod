@@ -124,12 +124,15 @@ TERM = "xterm-256color"
 
 #### APT Packages
 ```toml
-[dependencies.apt]
-python = ["python3", "python3-pip", "python3-dev"]
-build_tools = ["build-essential", "cmake", "ninja-build"]
-cpp_toolchain = ["clang-18", "libc++-18-dev"]
-utilities = ["git", "vim", "curl", "jq"]
-custom = ["my-custom-package"]  # Add custom packages
+[dependencies]
+apt = [
+    "python3",
+    "python3-pip",
+    "git",
+    "vim",
+    "curl",
+    "build-essential",
+]
 ```
 
 #### Node.js
@@ -215,11 +218,8 @@ Podman advantages:
 [container]
 base_image = "ubuntu:22.04"
 
-[dependencies.apt]
-python = ["python3", "python3-pip"]
-utilities = ["git", "curl"]
-build_tools = []
-cpp_toolchain = []
+[dependencies]
+apt = ["python3", "python3-pip", "git", "curl", "gosu", "sudo"]
 
 [dependencies.nodejs]
 enabled = false
@@ -228,12 +228,13 @@ enabled = false
 ### GPU-Enabled ML Environment
 ```toml
 [container]
-base_image = "nvidia/cuda:12.2.0-runtime-ubuntu22.04"
+base_image = "docker.io/nvidia/cuda:12.2.0-runtime-ubuntu22.04"
 
 [docker]
 enable_gpu = true
 
-[dependencies.pip]
+[dependencies]
+apt = ["python3", "python3-pip", "git", "gosu", "sudo"]
 pip = ["torch", "transformers", "numpy", "pandas"]
 ```
 

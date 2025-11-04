@@ -12,8 +12,21 @@ impl DockerClient {
     pub fn build(build_dir: &Path, image_tag: &str, runtime: &str) -> Result<String> {
         println!("Building container image with {}: {}", runtime, image_tag);
 
+        // Get current user's UID and GID to pass as build args
+        let uid = Self::get_uid();
+        let gid = Self::get_gid();
+
         let output = Command::new(runtime)
-            .args(["build", "-t", image_tag, "."])
+            .args([
+                "build",
+                "--build-arg",
+                &format!("USER_UID={}", uid),
+                "--build-arg",
+                &format!("USER_GID={}", gid),
+                "-t",
+                image_tag,
+                ".",
+            ])
             .current_dir(build_dir)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
