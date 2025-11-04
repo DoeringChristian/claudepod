@@ -57,9 +57,22 @@ RUN if getent passwd $USER_UID > /dev/null 2>&1; then \
     useradd -m -s /bin/bash -u $USER_UID -g $GROUP_NAME {{ user }} && \
     echo "{{ user }} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# Copy and setup entrypoint script
-COPY entrypoint.sh /usr/local/bin/
+# Set proper ownership and switch to non-root user
+RUN chown -R {{ user }}:{{ user }} {{ home_dir }}
+
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Switch to non-root user - all subsequent commands and entrypoint run as this user
+USER {{ user }}
+
+# Set HOME and update PATH
+ENV HOME={{ home_dir }}
+ENV PATH="{{ home_dir }}/.npm-global/bin:${PATH}"
+
+# Set working directory
+WORKDIR {{ work_dir }}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

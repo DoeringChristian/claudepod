@@ -14,7 +14,7 @@ extra_args = []
 
 [[docker.volumes]]
 host = "$PWD"
-container = "/home/code/work"
+container = "$PWD"
 readonly = false
 
 [[docker.volumes]]

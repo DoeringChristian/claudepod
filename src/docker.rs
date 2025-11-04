@@ -97,6 +97,11 @@ impl DockerClient {
             cmd.arg("-it");
         }
 
+        // For podman: preserve user namespace to fix file permissions
+        if runtime == "podman" {
+            cmd.arg("--userns=keep-id");
+        }
+
         // Set UID/GID environment variables
         cmd.arg("-e").arg(format!("UID={}", Self::get_uid()));
         cmd.arg("-e").arg(format!("GID={}", Self::get_gid()));
@@ -105,8 +110,10 @@ impl DockerClient {
         for volume in &config.docker.volumes {
             let host_path = shellexpand::full(&volume.host)
                 .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
+            let volume_path = shellexpand::full(&volume.container)
+                .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
 
-            let mut mount_arg = format!("{}:{}", host_path, volume.container);
+            let mut mount_arg = format!("{}:{}", host_path, volume_path);
             if volume.readonly {
                 mount_arg.push_str(":ro");
             }

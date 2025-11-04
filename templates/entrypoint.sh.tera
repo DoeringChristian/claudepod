@@ -1,13 +1,13 @@
 #!/bin/bash
+# Entrypoint script - runs as {{ user }} (set by USER directive in Dockerfile)
 
-# User is already created in Dockerfile, just ensure home directory exists
+# Ensure home directory exists
 mkdir -p {{ home_dir }}
 
-# Create python symlink if needed
-[ -e /usr/bin/python ] || ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
-
 # Copy bashrc if needed
-[ -f {{ home_dir }}/.bashrc ] || cp /etc/skel/.bashrc {{ home_dir }}/.bashrc 2>/dev/null || true
+if [ ! -f {{ home_dir }}/.bashrc ] && [ -f /etc/skel/.bashrc ]; then
+    cp /etc/skel/.bashrc {{ home_dir }}/.bashrc
+fi
 
 # Create environment file
 cat >{{ home_dir }}/.env <<'EOF'
@@ -49,29 +49,19 @@ EOF
 # Source it in .bashrc for interactive shells
 echo 'source ~/.env' >>{{ home_dir }}/.bashrc
 
-# Fix ownership
-chown {{ user }}:{{ user }} {{ home_dir }} {{ home_dir }}/.env {{ home_dir }}/.bashrc
-{%- if git_user_name or git_user_email %}
-chown {{ user }}:{{ user }} {{ home_dir }}/.gitconfig
-{%- endif %}
-{%- if history_search %}
-chown {{ user }}:{{ user }} {{ home_dir }}/.inputrc
-{%- endif %}
-
 {%- if install_claude %}
 
+# Install Claude Code
 echo "Setting up @anthropic-ai/claude-code..."
-gosu {{ user }} bash -c '
-    mkdir -p ~/.npm-global
-    npm config set prefix ~/.npm-global
-    npm install --silent -g @anthropic-ai/claude-code
-'
+mkdir -p {{ home_dir }}/.npm-global
+npm config set prefix {{ home_dir }}/.npm-global
+npm install --silent -g @anthropic-ai/claude-code
 {%- endif %}
 
 {%- if npm_packages %}
 
 echo "Installing additional npm packages..."
-gosu {{ user }} bash -c 'npm install --silent -g {{ npm_packages | join(sep=" ") }}'
+npm install --silent -g {{ npm_packages | join(sep=" ") }}
 {%- endif %}
 
 {%- if pip_packages %}
@@ -84,5 +74,5 @@ echo "Ready."
 
 cd {{ work_dir }}
 
-# Source the env file before running command
-exec gosu {{ user }} bash -c "source {{ home_dir }}/.env && $*"
+# Execute command with environment sourced
+exec bash -c "source {{ home_dir }}/.env && \"\$@\"" -- "$@"
