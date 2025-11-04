@@ -455,10 +455,7 @@ mod tests {
     fn test_default_config() {
         let config = ClaudepodConfig::default();
         assert_eq!(config.container.user, "code");
-        assert_eq!(
-            config.container.base_image,
-            "nvidia/cuda:12.6.1-runtime-ubuntu25.04"
-        );
+        assert_eq!(config.container.base_image, "ubuntu:25.04");
         assert!(config.validate().is_ok());
     }
 
