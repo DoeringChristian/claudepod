@@ -88,6 +88,7 @@ impl DockerClient {
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
+        resume: bool,
     ) -> Result<()> {
         let runtime = &config.docker.container_runtime;
         let mut cmd = Command::new(runtime);
@@ -162,6 +163,10 @@ impl DockerClient {
         if args.is_empty() {
             // Default: run Claude with configured settings
             cmd.arg("claude");
+
+            if resume {
+                cmd.arg("--resume");
+            }
 
             if config.claude.skip_permissions {
                 cmd.arg("--dangerously-skip-permissions");

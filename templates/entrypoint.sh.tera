@@ -53,5 +53,6 @@ echo "Ready."
 
 # Working directory is already set by docker run -w flag, don't change it
 
-# Execute command with environment sourced
-exec bash -c "source {{ home_dir }}/.env && \"\$@\"" -- "$@"
+# Source environment and execute command
+source {{ home_dir }}/.env
+exec -- "$@"
