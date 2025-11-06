@@ -67,6 +67,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Run a shell inside the container
+    Shell {
+        /// Shell to run (default: bash)
+        #[arg(default_value = "bash")]
+        shell: String,
+    },
 }
 
 fn main() {
@@ -88,6 +95,7 @@ fn run() -> Result<()> {
             cmd_run(full_args, skip_check)
         }
         Some(Commands::Check { verbose }) => cmd_check(verbose),
+        Some(Commands::Shell { shell }) => cmd_shell(shell),
         None => {
             // Default to running claudepod with args from top-level
             // All args (including flags like -d, --resume, etc.) are passed through
@@ -211,7 +219,36 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Run the container
     let current_dir = std::env::current_dir()
         .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
-    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir)?;
+    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir, true)?;
+
+    Ok(())
+}
+
+fn cmd_shell(shell: String) -> Result<()> {
+    // Load configuration
+    let (config, config_dir) = load_config()?;
+
+    // Load lock file
+    let lock = LockFile::from_file(LockManager::default_path()).map_err(|_| {
+        ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
+    })?;
+
+    // Check if image exists
+    let runtime = &config.docker.container_runtime;
+    if !DockerClient::image_exists(&lock.image_tag, runtime) {
+        return Err(ClaudepodError::Docker(format!(
+            "Container image '{}' not found. Run 'claudepod build' first.",
+            lock.image_tag
+        )));
+    }
+
+    // Run the container with the specified shell
+    let current_dir = std::env::current_dir()
+        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
+
+    // Pass the shell as a single argument, run_claude=false to run shell directly
+    let shell_args = vec![shell];
+    DockerClient::run(&config, &lock, &shell_args, &config_dir, &current_dir, false)?;
 
     Ok(())
 }

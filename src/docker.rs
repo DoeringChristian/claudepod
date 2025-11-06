@@ -88,6 +88,7 @@ impl DockerClient {
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
+        run_claude: bool,
     ) -> Result<()> {
         let runtime = &config.docker.container_runtime;
         let mut cmd = Command::new(runtime);
@@ -159,23 +160,30 @@ impl DockerClient {
         cmd.arg(&lock.image_tag);
 
         // Determine what command to run
-        if args.is_empty() {
-            // Default: run Claude with configured settings
-            cmd.arg("claude");
+        if run_claude {
+            if args.is_empty() {
+                // Default: run Claude with configured settings
+                cmd.arg("claude");
 
-            if config.claude.skip_permissions {
-                cmd.arg("--dangerously-skip-permissions");
-            }
+                if config.claude.skip_permissions {
+                    cmd.arg("--dangerously-skip-permissions");
+                }
 
-            cmd.arg("--max-turns");
-            cmd.arg(config.claude.max_turns.to_string());
+                cmd.arg("--max-turns");
+                cmd.arg(config.claude.max_turns.to_string());
 
-            for arg in &config.claude.extra_args {
-                cmd.arg(arg);
+                for arg in &config.claude.extra_args {
+                    cmd.arg(arg);
+                }
+            } else {
+                // User-provided arguments - pass everything through to claude
+                cmd.arg("claude");
+                for arg in args {
+                    cmd.arg(arg);
+                }
             }
         } else {
-            // User-provided arguments - pass everything through to claude
-            cmd.arg("claude");
+            // Run a different command (like shell)
             for arg in args {
                 cmd.arg(arg);
             }
