@@ -25,13 +25,9 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Arguments to pass to the container/Claude (when no subcommand specified)
+    /// Arguments to pass to Claude (when no subcommand specified)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
-
-    /// Resume the last conversation
-    #[arg(long, global = true)]
-    resume: bool,
 }
 
 #[derive(Subcommand)]
@@ -63,10 +59,6 @@ enum Commands {
         /// Skip checking if rebuild is needed
         #[arg(long)]
         skip_check: bool,
-
-        /// Resume the last conversation
-        #[arg(long)]
-        resume: bool,
     },
 
     /// Check configuration and lock file status
@@ -90,15 +82,16 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Init { force }) => cmd_init(force),
         Some(Commands::Build { force, no_lock }) => cmd_build(force, no_lock),
-        Some(Commands::Run { args, skip_check, resume }) => {
-            // Use resume from subcommand or fall back to global flag
-            let resume_flag = resume || cli.resume;
-            cmd_run(args, skip_check, resume_flag)
+        Some(Commands::Run { args, skip_check }) => {
+            // If resume flag is set, prepend --resume to args
+            let mut full_args = args;
+            cmd_run(full_args, skip_check)
         }
         Some(Commands::Check { verbose }) => cmd_check(verbose),
         None => {
             // Default to running claudepod with args from top-level
-            cmd_run(cli.args, false, cli.resume)
+            // All args (including flags like -d, --resume, etc.) are passed through
+            cmd_run(cli.args, false)
         }
     }
 }
@@ -179,7 +172,7 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(args: Vec<String>, skip_check: bool, resume: bool) -> Result<()> {
+fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Load configuration
     let (config, config_dir) = load_config()?;
 
@@ -218,7 +211,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool, resume: bool) -> Result<()> {
     // Run the container
     let current_dir = std::env::current_dir()
         .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
-    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir, resume)?;
+    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir)?;
 
     Ok(())
 }
