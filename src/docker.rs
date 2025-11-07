@@ -118,9 +118,15 @@ impl DockerClient {
         cmd.arg("-v")
             .arg(format!("{}:{}", project_dir_str, project_dir_str));
 
-        // Set working directory to the user's current directory
-        let working_dir_str = working_dir.to_string_lossy();
-        cmd.arg("-w").arg(working_dir_str.as_ref());
+        // Set working directory based on what we're running
+        let work_dir = if run_claude {
+            // When running Claude, use project directory (where claudepod.toml is)
+            project_dir.to_string_lossy()
+        } else {
+            // When running shell or other commands, use user's current directory
+            working_dir.to_string_lossy()
+        };
+        cmd.arg("-w").arg(work_dir.as_ref());
 
         // Mount additional volumes from config
         for volume in &config.docker.volumes {
@@ -161,26 +167,22 @@ impl DockerClient {
 
         // Determine what command to run
         if run_claude {
-            if args.is_empty() {
-                // Default: run Claude with configured settings
-                cmd.arg("claude");
+            // Default: run Claude with configured settings
+            cmd.arg("claude");
 
-                if config.claude.skip_permissions {
-                    cmd.arg("--dangerously-skip-permissions");
-                }
+            if config.claude.skip_permissions {
+                cmd.arg("--dangerously-skip-permissions");
+            }
 
-                cmd.arg("--max-turns");
-                cmd.arg(config.claude.max_turns.to_string());
+            cmd.arg("--max-turns");
+            cmd.arg(config.claude.max_turns.to_string());
 
-                for arg in &config.claude.extra_args {
-                    cmd.arg(arg);
-                }
-            } else {
-                // User-provided arguments - pass everything through to claude
-                cmd.arg("claude");
-                for arg in args {
-                    cmd.arg(arg);
-                }
+            for arg in &config.claude.extra_args {
+                cmd.arg(arg);
+            }
+
+            for arg in args {
+                cmd.arg(arg);
             }
         } else {
             // Run a different command (like shell)

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::ClaudepodConfig;
 use crate::error::{ClaudepodError, Result};
@@ -110,9 +110,9 @@ impl LockFile {
 pub struct LockManager;
 
 impl LockManager {
-    /// Get the default lock file path (in current directory)
-    pub fn default_path() -> String {
-        LOCK_FILE_NAME.to_string()
+    /// Get the lock file path in the given directory
+    pub fn lock_path(base_dir: &Path) -> PathBuf {
+        base_dir.join(LOCK_FILE_NAME)
     }
 
     /// Check if a lock file exists
@@ -121,8 +121,8 @@ impl LockManager {
     }
 
     /// Load or create a lock file
-    pub fn load_or_create(config: &ClaudepodConfig) -> Result<LockFile> {
-        let lock_path = Self::default_path();
+    pub fn load_or_create(config: &ClaudepodConfig, config_dir: &Path) -> Result<LockFile> {
+        let lock_path = Self::lock_path(config_dir);
 
         if Self::exists(&lock_path) {
             LockFile::from_file(&lock_path)
@@ -132,8 +132,8 @@ impl LockManager {
     }
 
     /// Check if rebuild is needed (config changed or image not built)
-    pub fn needs_rebuild(config: &ClaudepodConfig) -> Result<(bool, Option<String>)> {
-        let lock_path = Self::default_path();
+    pub fn needs_rebuild(config: &ClaudepodConfig, config_dir: &Path) -> Result<(bool, Option<String>)> {
+        let lock_path = Self::lock_path(config_dir);
 
         if !Self::exists(&lock_path) {
             return Ok((true, Some("Lock file does not exist".to_string())));
@@ -155,15 +155,15 @@ impl LockManager {
         Ok((false, None))
     }
 
-    /// Save a lock file to the default location
-    pub fn save(lock: &LockFile) -> Result<()> {
-        let lock_path = Self::default_path();
+    /// Save a lock file to the config directory
+    pub fn save(lock: &LockFile, config_dir: &Path) -> Result<()> {
+        let lock_path = Self::lock_path(config_dir);
         lock.save(&lock_path)
     }
 
     /// Delete the lock file
-    pub fn delete() -> Result<()> {
-        let lock_path = Self::default_path();
+    pub fn delete(config_dir: &Path) -> Result<()> {
+        let lock_path = Self::lock_path(config_dir);
         if Self::exists(&lock_path) {
             fs::remove_file(&lock_path)?;
         }

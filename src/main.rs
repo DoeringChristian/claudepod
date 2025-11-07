@@ -89,11 +89,7 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Init { force }) => cmd_init(force),
         Some(Commands::Build { force, no_lock }) => cmd_build(force, no_lock),
-        Some(Commands::Run { args, skip_check }) => {
-            // If resume flag is set, prepend --resume to args
-            let mut full_args = args;
-            cmd_run(full_args, skip_check)
-        }
+        Some(Commands::Run { args, skip_check }) => cmd_run(args, skip_check),
         Some(Commands::Check { verbose }) => cmd_check(verbose),
         Some(Commands::Shell { shell }) => cmd_shell(shell),
         None => {
@@ -130,11 +126,11 @@ fn cmd_init(force: bool) -> Result<()> {
 
 fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
     // Load configuration
-    let (config, _config_dir) = load_config()?;
+    let (config, config_dir) = load_config()?;
 
     // Check if rebuild is needed (unless force)
     if !force {
-        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config)?;
+        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
         if !needs_rebuild {
             println!("Image is up to date. Use --force to rebuild anyway.");
             return Ok(());
@@ -146,8 +142,8 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
         println!("Force rebuild requested");
     }
 
-    // Create build directory
-    let build_dir = PathBuf::from(BUILD_DIR);
+    // Create build directory in the same location as claudepod.toml
+    let build_dir = config_dir.join(BUILD_DIR);
     fs::create_dir_all(&build_dir)?;
 
     // Generate Dockerfile and entrypoint
@@ -171,8 +167,9 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
         let mut lock = LockFile::new(&config)?;
         lock.image_tag = image_tag;
         lock.set_image_id(image_id);
-        LockManager::save(&lock)?;
-        println!("Updated lock file: {}", LockManager::default_path());
+        LockManager::save(&lock, &config_dir)?;
+        let lock_path = LockManager::lock_path(&config_dir);
+        println!("Updated lock file: {}", lock_path.display());
     }
 
     println!("\nBuild complete! Run 'claudepod run' to start the container.");
@@ -186,7 +183,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
 
     // Check if rebuild is needed
     if !skip_check {
-        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config)?;
+        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
 
         if needs_rebuild {
             println!(
@@ -203,7 +200,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     }
 
     // Load lock file (should exist now after potential rebuild)
-    let lock = LockFile::from_file(LockManager::default_path()).map_err(|_| {
+    let lock = LockFile::from_file(LockManager::lock_path(&config_dir)).map_err(|_| {
         ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
     })?;
 
@@ -219,6 +216,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Run the container
     let current_dir = std::env::current_dir()
         .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
+
     DockerClient::run(&config, &lock, &args, &config_dir, &current_dir, true)?;
 
     Ok(())
@@ -229,7 +227,7 @@ fn cmd_shell(shell: String) -> Result<()> {
     let (config, config_dir) = load_config()?;
 
     // Load lock file
-    let lock = LockFile::from_file(LockManager::default_path()).map_err(|_| {
+    let lock = LockFile::from_file(LockManager::lock_path(&config_dir)).map_err(|_| {
         ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
     })?;
 
@@ -248,7 +246,14 @@ fn cmd_shell(shell: String) -> Result<()> {
 
     // Pass the shell as a single argument, run_claude=false to run shell directly
     let shell_args = vec![shell];
-    DockerClient::run(&config, &lock, &shell_args, &config_dir, &current_dir, false)?;
+    DockerClient::run(
+        &config,
+        &lock,
+        &shell_args,
+        &config_dir,
+        &current_dir,
+        false,
+    )?;
 
     Ok(())
 }
@@ -268,10 +273,10 @@ fn cmd_check(verbose: bool) -> Result<()> {
     println!("✓ Configuration file: {}", config_path.display());
 
     // Load and validate config
-    let config = match load_config() {
-        Ok((c, _)) => {
+    let (config, config_dir) = match load_config() {
+        Ok((c, d)) => {
             println!("✓ Configuration is valid");
-            c
+            (c, d)
         }
         Err(e) => {
             println!("❌ Configuration validation failed: {}", e);
@@ -296,13 +301,13 @@ fn cmd_check(verbose: bool) -> Result<()> {
     }
 
     // Check lock file
-    let lock_path = LockManager::default_path();
+    let lock_path = LockManager::lock_path(&config_dir);
     if !LockManager::exists(&lock_path) {
-        println!("\n❌ Lock file not found: {}", lock_path);
+        println!("\n❌ Lock file not found: {}", lock_path.display());
         println!("   Run 'claudepod build' to create it.");
         return Ok(());
     }
-    println!("\n✓ Lock file: {}", lock_path);
+    println!("\n✓ Lock file: {}", lock_path.display());
 
     // Load lock file
     let lock = match LockFile::from_file(&lock_path) {
@@ -348,7 +353,7 @@ fn cmd_check(verbose: bool) -> Result<()> {
     }
 
     // Final status
-    let (needs_rebuild, reason) = LockManager::needs_rebuild(&config)?;
+    let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
     if needs_rebuild {
         println!("\n⚠ Rebuild recommended: {}", reason.unwrap_or_default());
         println!("   Run 'claudepod build'");
