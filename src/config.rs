@@ -105,7 +105,7 @@ pub struct ClaudeConfig {
     #[serde(default = "default_true")]
     pub install_at_startup: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub skip_permissions: bool,
 
     #[serde(default = "default_max_turns")]
@@ -309,7 +309,7 @@ impl Default for ClaudeConfig {
     fn default() -> Self {
         Self {
             install_at_startup: true,
-            skip_permissions: false,
+            skip_permissions: true,
             max_turns: 99999999,
             extra_args: vec![],
         }
