@@ -105,7 +105,7 @@ pub struct ClaudeConfig {
     #[serde(default = "default_true")]
     pub install_at_startup: bool,
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub skip_permissions: bool,
 
     #[serde(default = "default_max_turns")]
