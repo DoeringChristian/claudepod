@@ -106,17 +106,17 @@ impl DockerClient {
 
             // Compare image IDs (container returns full ID, lock file has truncated ID)
             if !container_image.starts_with(expected_image) {
-                println!("⚠ Container exists but uses old image. Recreating...");
-                Self::remove_container(&container_name, runtime)?;
-                Self::create_container(config, lock, project_dir, &container_name)?;
+                // Image has changed - warn user instead of auto-recreating
+                println!("⚠ Warning: Your claudepod.toml configuration has changed since this container was created.");
+                println!("   The container is using an older configuration.");
+                println!("   Run 'claudepod reset' to recreate the container with the new configuration.");
+                println!();
+            }
+
+            // Start container if needed (regardless of config mismatch)
+            if !Self::container_is_running(&container_name, runtime) {
                 println!("Starting container...");
                 Self::start_container(&container_name, runtime)?;
-            } else {
-                // Container exists with correct image, start it if needed
-                if !Self::container_is_running(&container_name, runtime) {
-                    println!("Starting container...");
-                    Self::start_container(&container_name, runtime)?;
-                }
             }
         } else {
             // Create new container

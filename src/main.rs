@@ -74,6 +74,9 @@ enum Commands {
         #[arg(default_value = "bash")]
         shell: String,
     },
+
+    /// Remove the persistent container and create a new one
+    Reset,
 }
 
 fn main() {
@@ -92,6 +95,7 @@ fn run() -> Result<()> {
         Some(Commands::Run { args, skip_check }) => cmd_run(args, skip_check),
         Some(Commands::Check { verbose }) => cmd_check(verbose),
         Some(Commands::Shell { shell }) => cmd_shell(shell),
+        Some(Commands::Reset) => cmd_reset(),
         None => {
             // Default to running claudepod with args from top-level
             // All args (including flags like -d, --resume, etc.) are passed through
@@ -254,6 +258,30 @@ fn cmd_shell(shell: String) -> Result<()> {
         &current_dir,
         false,
     )?;
+
+    Ok(())
+}
+
+fn cmd_reset() -> Result<()> {
+    println!("Resetting claudepod container...\n");
+
+    // Load configuration
+    let (config, config_dir) = load_config()?;
+
+    // Generate container name
+    let container_name = DockerClient::container_name(&config_dir);
+    let runtime = &config.docker.container_runtime;
+
+    // Check if container exists
+    if DockerClient::container_exists(&container_name, runtime) {
+        println!("Removing existing container: {}", container_name);
+        DockerClient::remove_container(&container_name, runtime)?;
+        println!("✓ Container removed");
+    } else {
+        println!("No existing container found for this project");
+    }
+
+    println!("\nNext time you run 'claudepod run' or 'claudepod shell', a fresh container will be created.");
 
     Ok(())
 }
