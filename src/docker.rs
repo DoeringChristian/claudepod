@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -81,7 +82,7 @@ impl DockerClient {
         Self::get_image_id(image_tag, runtime).is_ok()
     }
 
-    /// Run a container
+    /// Run a container (using persistent containers)
     pub fn run(
         config: &ClaudepodConfig,
         lock: &LockFile,
@@ -91,13 +92,61 @@ impl DockerClient {
         run_claude: bool,
     ) -> Result<()> {
         let runtime = &config.docker.container_runtime;
-        let mut cmd = Command::new(runtime);
-        cmd.arg("run");
+        let container_name = Self::container_name(project_dir);
 
-        // Remove on exit
-        if config.docker.remove_on_exit {
-            cmd.arg("--rm");
+        // Check if container exists
+        let container_exists = Self::container_exists(&container_name, runtime);
+
+        if container_exists {
+            // Check if container is using the current image
+            let container_image = Self::get_container_image(&container_name, runtime)?;
+            let expected_image = lock.image_id.as_ref().ok_or_else(|| {
+                ClaudepodError::Docker("Image ID not found in lock file".to_string())
+            })?;
+
+            // Compare image IDs (container returns full ID, lock file has truncated ID)
+            if !container_image.starts_with(expected_image) {
+                println!("⚠ Container exists but uses old image. Recreating...");
+                Self::remove_container(&container_name, runtime)?;
+                Self::create_container(config, lock, project_dir, &container_name)?;
+                println!("Starting container...");
+                Self::start_container(&container_name, runtime)?;
+            } else {
+                // Container exists with correct image, start it if needed
+                if !Self::container_is_running(&container_name, runtime) {
+                    println!("Starting container...");
+                    Self::start_container(&container_name, runtime)?;
+                }
+            }
+        } else {
+            // Create new container
+            println!("Creating container: {}", container_name);
+            Self::create_container(config, lock, project_dir, &container_name)?;
+            println!("Starting container...");
+            Self::start_container(&container_name, runtime)?;
         }
+
+        // Execute command in the running container
+        Self::exec_in_container(
+            config,
+            &container_name,
+            args,
+            project_dir,
+            working_dir,
+            run_claude,
+        )
+    }
+
+    /// Create a persistent container
+    fn create_container(
+        config: &ClaudepodConfig,
+        lock: &LockFile,
+        project_dir: &Path,
+        container_name: &str,
+    ) -> Result<()> {
+        let runtime = &config.docker.container_runtime;
+        let mut cmd = Command::new(runtime);
+        cmd.args(["create", "--name", container_name]);
 
         // Interactive terminal
         if config.docker.interactive {
@@ -117,16 +166,6 @@ impl DockerClient {
         let project_dir_str = project_dir.to_string_lossy();
         cmd.arg("-v")
             .arg(format!("{}:{}", project_dir_str, project_dir_str));
-
-        // Set working directory based on what we're running
-        let work_dir = if run_claude {
-            // When running Claude, use project directory (where claudepod.toml is)
-            project_dir.to_string_lossy()
-        } else {
-            // When running shell or other commands, use user's current directory
-            working_dir.to_string_lossy()
-        };
-        cmd.arg("-w").arg(work_dir.as_ref());
 
         // Mount additional volumes from config
         for volume in &config.docker.volumes {
@@ -165,9 +204,52 @@ impl DockerClient {
         // Image tag
         cmd.arg(&lock.image_tag);
 
+        // Keep container running with a sleep infinity command
+        cmd.arg("sleep").arg("infinity");
+
+        // Execute the command
+        let output = cmd
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to create container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to create container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Execute a command in a running container
+    fn exec_in_container(
+        config: &ClaudepodConfig,
+        container_name: &str,
+        args: &[String],
+        project_dir: &Path,
+        working_dir: &Path,
+        run_claude: bool,
+    ) -> Result<()> {
+        let runtime = &config.docker.container_runtime;
+        let mut cmd = Command::new(runtime);
+        cmd.args(["exec", "-it"]);
+
+        // Set working directory based on what we're running
+        let work_dir = if run_claude {
+            // When running Claude, use project directory (where claudepod.toml is)
+            project_dir.to_string_lossy()
+        } else {
+            // When running shell or other commands, use user's current directory
+            working_dir.to_string_lossy()
+        };
+        cmd.arg("-w").arg(work_dir.as_ref());
+
+        cmd.arg(container_name);
+
         // Determine what command to run
         if run_claude {
-            // Default: run Claude with configured settings
+            // Run Claude with configured settings
             cmd.arg("claude");
 
             if config.claude.skip_permissions {
@@ -181,6 +263,7 @@ impl DockerClient {
                 cmd.arg(arg);
             }
 
+            // Add user-provided arguments
             for arg in args {
                 cmd.arg(arg);
             }
@@ -191,19 +274,17 @@ impl DockerClient {
             }
         }
 
-        println!("Running container...");
-
         // Execute the command, inheriting stdio
         let status = cmd
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .map_err(|e| ClaudepodError::Docker(format!("Failed to run container: {}", e)))?;
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to exec in container: {}", e)))?;
 
         if !status.success() {
             return Err(ClaudepodError::Docker(format!(
-                "Container exited with code: {}",
+                "Command exited with code: {}",
                 status.code().unwrap_or(-1)
             )));
         }
@@ -233,6 +314,113 @@ impl DockerClient {
         {
             1000 // Default for non-Unix systems
         }
+    }
+
+    /// Generate a unique container name for a project
+    pub fn container_name(project_dir: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(project_dir.to_string_lossy().as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        format!("claudepod-{}", &hash[..12])
+    }
+
+    /// Check if a container exists (running or stopped)
+    pub fn container_exists(container_name: &str, runtime: &str) -> bool {
+        Command::new(runtime)
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &format!("name=^{}$", container_name),
+                "--format",
+                "{{.Names}}",
+            ])
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim() == container_name)
+                } else {
+                    Some(false)
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check if a container is running
+    pub fn container_is_running(container_name: &str, runtime: &str) -> bool {
+        Command::new(runtime)
+            .args([
+                "ps",
+                "--filter",
+                &format!("name=^{}$", container_name),
+                "--format",
+                "{{.Names}}",
+            ])
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim() == container_name)
+                } else {
+                    Some(false)
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    /// Remove a container
+    pub fn remove_container(container_name: &str, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args(["rm", "-f", container_name])
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to remove container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to remove container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Start a stopped container
+    pub fn start_container(container_name: &str, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args(["start", container_name])
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to start container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to start container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get the image ID that a container is using
+    pub fn get_container_image(container_name: &str, runtime: &str) -> Result<String> {
+        let output = Command::new(runtime)
+            .args(["inspect", "--format", "{{.Image}}", container_name])
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to inspect container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(
+                "Failed to get container image".to_string(),
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 }
 

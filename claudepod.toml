@@ -38,7 +38,7 @@ user_email = ""
 
 [claude]
 install_at_startup = true
-skip_permissions = false
+skip_permissions = true
 max_turns = 99999999
 extra_args = []
 
