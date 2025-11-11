@@ -96,14 +96,6 @@ impl LockFile {
     pub fn set_image_id(&mut self, image_id: String) {
         self.image_id = Some(image_id);
     }
-
-    /// Update the lock file with new config (resets image_id)
-    pub fn update_for_config(&mut self, config: &ClaudepodConfig) -> Result<()> {
-        self.config_hash = Self::compute_config_hash(config)?;
-        self.created_at = Utc::now();
-        self.image_id = None; // Reset image ID as we need to rebuild
-        Ok(())
-    }
 }
 
 /// Helper functions for lock file management
@@ -118,17 +110,6 @@ impl LockManager {
     /// Check if a lock file exists
     pub fn exists<P: AsRef<Path>>(path: P) -> bool {
         path.as_ref().exists()
-    }
-
-    /// Load or create a lock file
-    pub fn load_or_create(config: &ClaudepodConfig, config_dir: &Path) -> Result<LockFile> {
-        let lock_path = Self::lock_path(config_dir);
-
-        if Self::exists(&lock_path) {
-            LockFile::from_file(&lock_path)
-        } else {
-            Ok(LockFile::new(config)?)
-        }
     }
 
     /// Check if rebuild is needed (config changed or image not built)
@@ -159,15 +140,6 @@ impl LockManager {
     pub fn save(lock: &LockFile, config_dir: &Path) -> Result<()> {
         let lock_path = Self::lock_path(config_dir);
         lock.save(&lock_path)
-    }
-
-    /// Delete the lock file
-    pub fn delete(config_dir: &Path) -> Result<()> {
-        let lock_path = Self::lock_path(config_dir);
-        if Self::exists(&lock_path) {
-            fs::remove_file(&lock_path)?;
-        }
-        Ok(())
     }
 }
 

@@ -24,9 +24,6 @@ pub enum ClaudepodError {
     #[error("Docker command failed: {0}")]
     Docker(String),
 
-    #[error("Lock file mismatch: configuration has changed, rebuild required")]
-    LockFileMismatch,
-
     #[error("File not found: {0}")]
     FileNotFound(String),
 

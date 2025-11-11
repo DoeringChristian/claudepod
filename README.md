@@ -49,9 +49,38 @@ claudepod run
 
 Or pass custom arguments:
 ```bash
-claudepod run bash  # Start an interactive shell
-claudepod run claude --help  # Run Claude with custom flags
+claudepod run --resume         # Resume last conversation
+claudepod run -d              # Debug mode
+claudepod shell               # Open interactive shell
 ```
+
+## Container Persistence
+
+Claudepod uses **persistent containers** to improve performance and maintain state:
+
+- **One container per project**: Each project gets a unique container named based on the project directory path hash (e.g., `claudepod-5a7f9b311102`)
+- **Containers are reused**: The same container is reused across multiple runs for much faster startup
+- **State preservation**: Files, installed packages, and command history persist between runs
+- **Automatic management**: Containers are created on first run and reused thereafter
+
+### When Containers Are Recreated
+
+Containers are **NOT** automatically recreated when you change `claudepod.toml`. This prevents accidental data loss from work done inside the container.
+
+Instead, when configuration and container are out of sync:
+1. A warning is displayed when you run claudepod
+2. Run `claudepod reset` to remove the old container
+3. Next run will create a fresh container with the new configuration
+
+### Working Directory Behavior
+
+Claudepod uses different working directories depending on the command:
+
+- **Claude Code** (`claudepod run`): Runs in the project directory (where `claudepod.toml` is located)
+- **Shell** (`claudepod shell`): Runs in your current working directory
+- **Custom commands**: Run in your current working directory
+
+This allows Claude to work with your project files while letting you navigate freely when using the shell.
 
 ## Commands
 
@@ -74,6 +103,32 @@ Run Claude Code in a container.
 Options:
 - `--skip-check`: Skip checking if rebuild is needed
 - `[ARGS...]`: Arguments to pass to the container/Claude
+
+### `claudepod shell [SHELL]`
+Open an interactive shell in the container.
+
+Options:
+- `[SHELL]`: Shell to run (default: bash)
+
+Examples:
+```bash
+claudepod shell          # Open bash in container
+claudepod shell zsh      # Open zsh in container
+```
+
+### `claudepod reset`
+Remove the persistent container and recreate it on next run.
+
+Use this when:
+- You see warnings about configuration mismatches
+- You want to start fresh with a clean container
+- Container state has become corrupted
+
+Example:
+```bash
+claudepod reset         # Remove container
+claudepod run           # Creates fresh container
+```
 
 ### `claudepod check`
 Check configuration and lock file status.
@@ -101,7 +156,7 @@ container_runtime = "podman"  # or "docker"
 enable_gpu = true
 gpu_driver = "all"
 interactive = true
-remove_on_exit = true
+remove_on_exit = true  # Note: Ignored with persistent containers (containers are always persistent)
 ```
 
 ### Volume Mounts
@@ -240,13 +295,43 @@ pip = ["torch", "transformers", "numpy", "pandas"]
 
 ## Workflow
 
-1. Make changes to `claudepod.toml`
-2. Run `claudepod check` to see if rebuild is needed
-3. Run `claudepod build` to rebuild the image
-4. Run `claudepod run` to start Claude Code
-5. The lock file prevents accidental use of outdated images
+1. **Make changes** to `claudepod.toml`
+2. **Check status**: Run `claudepod check` to see if rebuild is needed
+3. **Rebuild image**: Run `claudepod build` to rebuild with new configuration
+4. **Reset container**: Run `claudepod reset` to remove old container (if warned about mismatch)
+5. **Run Claude**: Run `claudepod run` to start Claude Code
+6. The container persists across runs for better performance
+7. Changes made inside the container (installed packages, files) are preserved
 
 ## Troubleshooting
+
+### "Configuration mismatch" warning
+You'll see this warning when your `claudepod.toml` has changed since the container was created:
+```
+⚠ Warning: Your claudepod.toml configuration has changed since this container was created.
+   The container is using an older configuration.
+   Run 'claudepod reset' to recreate the container with the new configuration.
+```
+
+**Solution**:
+1. Run `claudepod build` to rebuild the image with new settings
+2. Run `claudepod reset` to remove the old container
+3. Run `claudepod run` to create a fresh container
+
+### Container has stale state
+If you want to start fresh with a clean container state, run:
+```bash
+claudepod reset
+```
+The next run will create a new container from scratch.
+
+### Finding your container
+Containers are named `claudepod-<hash>` where the hash is based on your project directory path. To see all containers:
+```bash
+podman ps -a | grep claudepod
+# or
+docker ps -a | grep claudepod
+```
 
 ### "Lock file mismatch" error
 Your configuration has changed since the last build. Run `claudepod build` to rebuild.
