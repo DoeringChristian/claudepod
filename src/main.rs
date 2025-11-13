@@ -185,24 +185,6 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Load configuration
     let (config, config_dir) = load_config()?;
 
-    // Check if rebuild is needed
-    if !skip_check {
-        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
-
-        if needs_rebuild {
-            println!(
-                "⚠ {}",
-                reason.unwrap_or_else(|| "Rebuild needed".to_string())
-            );
-            println!("Building container image automatically...\n");
-
-            // Run build automatically
-            cmd_build(false, false)?;
-
-            println!();
-        }
-    }
-
     // Load lock file (should exist now after potential rebuild)
     let lock = LockFile::from_file(LockManager::lock_path(&config_dir)).map_err(|_| {
         ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
@@ -211,6 +193,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     // Check if image exists
     let runtime = &config.docker.container_runtime;
     if !DockerClient::image_exists(&lock.image_tag, runtime) {
+        cmd_build(false, false)?;
         return Err(ClaudepodError::Docker(format!(
             "Container image '{}' not found. Run 'claudepod build' first.",
             lock.image_tag
@@ -231,9 +214,19 @@ fn cmd_shell(shell: String) -> Result<()> {
     let (config, config_dir) = load_config()?;
 
     // Load lock file
-    let lock = LockFile::from_file(LockManager::lock_path(&config_dir)).map_err(|_| {
-        ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
-    })?;
+    let lock_path = LockManager::lock_path(&config_dir);
+
+    let lock = match LockFile::from_file(&lock_path) {
+        Ok(lock) => lock,
+        Err(_) => {
+            cmd_build(false, false)?;
+            LockFile::from_file(&lock_path).map_err(|err| {
+                ClaudepodError::Other(
+                    "Lock file not found. Run 'claudepod build' first.".to_string(),
+                )
+            })?
+        }
+    };
 
     // Check if image exists
     let runtime = &config.docker.container_runtime;
