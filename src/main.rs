@@ -186,9 +186,17 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
     let (config, config_dir) = load_config()?;
 
     // Load lock file (should exist now after potential rebuild)
-    let lock = LockFile::from_file(LockManager::lock_path(&config_dir)).map_err(|_| {
-        ClaudepodError::Other("Lock file not found. Run 'claudepod build' first.".to_string())
-    })?;
+    let lock = match LockFile::from_file(&config_dir) {
+        Ok(lock) => lock,
+        Err(_) => {
+            cmd_build(false, false)?;
+            LockFile::from_file(&config_dir).map_err(|err| {
+                ClaudepodError::Other(
+                    "Lock file not found. Run 'claudepod build' first.".to_string(),
+                )
+            })?
+        }
+    };
 
     // Check if image exists
     let runtime = &config.docker.container_runtime;
