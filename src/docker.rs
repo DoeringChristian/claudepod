@@ -86,10 +86,10 @@ impl DockerClient {
     pub fn run(
         config: &ClaudepodConfig,
         lock: &LockFile,
+        command_name: &str,
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
-        run_claude: bool,
     ) -> Result<()> {
         let runtime = &config.docker.container_runtime;
         let container_name = Self::container_name(project_dir);
@@ -130,10 +130,10 @@ impl DockerClient {
         Self::exec_in_container(
             config,
             &container_name,
+            command_name,
             args,
             project_dir,
             working_dir,
-            run_claude,
         )
     }
 
@@ -226,52 +226,37 @@ impl DockerClient {
     fn exec_in_container(
         config: &ClaudepodConfig,
         container_name: &str,
+        command_name: &str,
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
-        run_claude: bool,
     ) -> Result<()> {
+        // Resolve the command
+        let (executable, cmd_config) = config.cmd.resolve(command_name)?;
+
         let runtime = &config.docker.container_runtime;
         let mut cmd = Command::new(runtime);
         cmd.args(["exec", "-it"]);
 
-        // Set working directory based on what we're running
-        let work_dir = if run_claude {
-            // When running Claude, use project directory (where claudepod.toml is)
-            project_dir.to_string_lossy()
-        } else {
-            // When running shell or other commands, use user's current directory
-            working_dir.to_string_lossy()
-        };
+        // Set working directory - shells run in current dir, others in project dir
+        let work_dir = working_dir.to_string_lossy();
         cmd.arg("-w").arg(work_dir.as_ref());
 
         cmd.arg(container_name);
 
-        // Determine what command to run
-        if run_claude {
-            // Run Claude with configured settings
-            cmd.arg("claude");
+        // Add the executable
+        cmd.arg(&executable);
 
-            if config.claude.skip_permissions {
-                cmd.arg("--dangerously-skip-permissions");
-            }
-
-            cmd.arg("--max-turns");
-            cmd.arg(config.claude.max_turns.to_string());
-
-            for arg in &config.claude.extra_args {
+        // Add configured args (parse them as space-separated)
+        if !cmd_config.args.is_empty() {
+            for arg in cmd_config.args.split_whitespace() {
                 cmd.arg(arg);
             }
+        }
 
-            // Add user-provided arguments
-            for arg in args {
-                cmd.arg(arg);
-            }
-        } else {
-            // Run a different command (like shell)
-            for arg in args {
-                cmd.arg(arg);
-            }
+        // Add user-provided arguments
+        for arg in args {
+            cmd.arg(arg);
         }
 
         // Execute the command, inheriting stdio

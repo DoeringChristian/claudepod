@@ -71,13 +71,13 @@ USER {{ user }}
 ENV HOME={{ home_dir }}
 ENV PATH="{{ home_dir }}/.npm-global/bin:${PATH}"
 
-{%- if install_claude %}
+{%- for name, cmd in commands %}
+{%- if cmd.install %}
 
-# Install Claude Code during build
-RUN mkdir -p {{ home_dir }}/.npm-global && \
-    npm config set prefix {{ home_dir }}/.npm-global && \
-    npm install --silent -g @anthropic-ai/claude-code
+# Install {{ name }}
+{{ cmd.install }}
 {%- endif %}
+{%- endfor %}
 
 {%- if npm_packages %}
 

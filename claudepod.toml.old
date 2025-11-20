@@ -2,7 +2,7 @@
 base_image = "ubuntu:25.04"
 user = "code"
 home_dir = "/home/code"
-work_dir = "$PWD"
+work_dir = "/home/code/work"
 
 [docker]
 container_runtime = "podman"
@@ -11,11 +11,6 @@ gpu_driver = "all"
 interactive = true
 remove_on_exit = true
 extra_args = []
-
-[[docker.volumes]]
-host = "$PWD"
-container = "$PWD"
-readonly = false
 
 [[docker.volumes]]
 host = "$HOME/.claude"
@@ -28,38 +23,23 @@ container = "/home/code/.claude.json"
 readonly = false
 
 [[docker.tmpfs]]
-path = "/workspace/build"
+path = "/home/code/work/build"
 readonly = true
 size = "1m"
 
 [environment]
+TERM = "xterm-256color"
 CC = "clang-18"
 CXX = "clang++-18"
-TERM = "xterm-256color"
 
 [git]
 user_name = ""
 user_email = ""
 
-[cmd]
-default = "claude"
-
-[cmd.zsh]
-args = ""
-
-[cmd.bash]
-args = ""
-
-[cmd.claude]
-install = '''
-RUN mkdir -p /home/code/.npm-global && \
-    npm config set prefix /home/code/.npm-global && \
-    npm install --silent -g @anthropic-ai/claude-code'''
-args = "--dangerously-skip-permissions --max-turns 99999999"
-
-[cmd.shell]
-args = ""
-command = "bash"
+[claude]
+skip_permissions = true
+max_turns = 99999999
+extra_args = []
 
 [dependencies]
 apt = [
@@ -92,6 +72,22 @@ apt = [
 pip = []
 npm = []
 custom = []
+
+# CLAUDE: example of specifying a command. This can be run with `claudepod claude`
+[cmd.claude]
+install = '''
+RUN mkdir -p /home/code/.npm-global && \
+    npm config set prefix /home/code/.npm-global && \
+    npm install --silent -g @anthropic-ai/claude-code
+'''
+args = "--dangerously-skip-permissions --max-turns 99999999"
+
+# CLAUDE: this will be a special command that is run when calling `claudepod`,
+# and should be able to reference other commands. All commands can either
+# specify the command as above, or reference another command.
+[cmd]
+default = "claude"
+
 
 [dependencies.nodejs]
 enabled = true

@@ -103,8 +103,14 @@ impl Generator {
         context.insert("aliases", &config.shell.aliases);
         context.insert("history_search", &config.shell.history_search);
 
-        // Claude config
-        context.insert("install_claude", &config.claude.install_at_startup);
+        // Commands config - collect all commands with install steps
+        let commands_with_install: std::collections::HashMap<_, _> = config
+            .cmd
+            .commands
+            .iter()
+            .filter(|(_, cmd)| cmd.install.is_some())
+            .collect();
+        context.insert("commands", &commands_with_install);
 
         // Pip and npm packages
         context.insert("pip_packages", &config.dependencies.pip);

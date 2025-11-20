@@ -50,29 +50,11 @@ enum Commands {
         no_lock: bool,
     },
 
-    /// Run Claude Code in a container
-    Run {
-        /// Arguments to pass to the container/Claude
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-
-        /// Skip checking if rebuild is needed
-        #[arg(long)]
-        skip_check: bool,
-    },
-
     /// Check configuration and lock file status
     Check {
         /// Show verbose output
         #[arg(short, long)]
         verbose: bool,
-    },
-
-    /// Run a shell inside the container
-    Shell {
-        /// Shell to run (default: bash)
-        #[arg(default_value = "bash")]
-        shell: String,
     },
 
     /// Remove the persistent container and create a new one
@@ -92,14 +74,24 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Init { force }) => cmd_init(force),
         Some(Commands::Build { force, no_lock }) => cmd_build(force, no_lock),
-        Some(Commands::Run { args, skip_check }) => cmd_run(args, skip_check),
         Some(Commands::Check { verbose }) => cmd_check(verbose),
-        Some(Commands::Shell { shell }) => cmd_shell(shell),
         Some(Commands::Reset) => cmd_reset(),
         None => {
-            // Default to running claudepod with args from top-level
-            // All args (including flags like -d, --resume, etc.) are passed through
-            cmd_run(cli.args, false)
+            // Check if first arg is a defined command, otherwise use default
+            let (config, _config_dir) = load_config()?;
+
+            if let Some(first_arg) = cli.args.first() {
+                // Check if it's a defined command
+                if config.cmd.commands.contains_key(first_arg.as_str()) {
+                    // Run the named command with remaining args
+                    let command_name = first_arg.clone();
+                    let args = cli.args[1..].to_vec();
+                    return cmd_run_command(&command_name, args);
+                }
+            }
+
+            // Not a command name, run default command with all args
+            cmd_run_command(&config.cmd.default, cli.args)
         }
     }
 }
@@ -181,7 +173,7 @@ fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
+fn cmd_run_command(command_name: &str, args: Vec<String>) -> Result<()> {
     // Load configuration
     let (config, config_dir) = load_config()?;
 
@@ -191,7 +183,7 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
         Ok(lock) => lock,
         Err(_) => {
             cmd_build(false, false)?;
-            LockFile::from_file(&lock_path).map_err(|err| {
+            LockFile::from_file(&lock_path).map_err(|_err| {
                 ClaudepodError::Other(
                     "Lock file not found. Run 'claudepod build' first.".to_string(),
                 )
@@ -209,57 +201,11 @@ fn cmd_run(args: Vec<String>, skip_check: bool) -> Result<()> {
         )));
     }
 
-    // Run the container
+    // Run the container with the specified command
     let current_dir = std::env::current_dir()
         .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
 
-    DockerClient::run(&config, &lock, &args, &config_dir, &current_dir, true)?;
-
-    Ok(())
-}
-
-fn cmd_shell(shell: String) -> Result<()> {
-    // Load configuration
-    let (config, config_dir) = load_config()?;
-
-    // Load lock file
-    let lock_path = LockManager::lock_path(&config_dir);
-
-    let lock = match LockFile::from_file(&lock_path) {
-        Ok(lock) => lock,
-        Err(_) => {
-            cmd_build(false, false)?;
-            LockFile::from_file(&lock_path).map_err(|err| {
-                ClaudepodError::Other(
-                    "Lock file not found. Run 'claudepod build' first.".to_string(),
-                )
-            })?
-        }
-    };
-
-    // Check if image exists
-    let runtime = &config.docker.container_runtime;
-    if !DockerClient::image_exists(&lock.image_tag, runtime) {
-        return Err(ClaudepodError::Docker(format!(
-            "Container image '{}' not found. Run 'claudepod build' first.",
-            lock.image_tag
-        )));
-    }
-
-    // Run the container with the specified shell
-    let current_dir = std::env::current_dir()
-        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
-
-    // Pass the shell as a single argument, run_claude=false to run shell directly
-    let shell_args = vec![shell];
-    DockerClient::run(
-        &config,
-        &lock,
-        &shell_args,
-        &config_dir,
-        &current_dir,
-        false,
-    )?;
+    DockerClient::run(&config, &lock, command_name, &args, &config_dir, &current_dir)?;
 
     Ok(())
 }

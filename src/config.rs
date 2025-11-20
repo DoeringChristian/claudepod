@@ -20,7 +20,7 @@ pub struct ClaudepodConfig {
     pub git: GitConfig,
 
     #[serde(default)]
-    pub claude: ClaudeConfig,
+    pub cmd: CommandsConfig,
 
     #[serde(default)]
     pub dependencies: DependenciesConfig,
@@ -101,18 +101,27 @@ pub struct GitConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ClaudeConfig {
-    #[serde(default = "default_true")]
-    pub install_at_startup: bool,
+pub struct CommandConfig {
+    /// Optional Dockerfile RUN command for installation
+    pub install: Option<String>,
 
+    /// Runtime arguments to pass to the command
     #[serde(default)]
-    pub skip_permissions: bool,
+    pub args: String,
 
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u64,
+    /// Command reference (for aliases) or None to use key name as executable
+    pub command: Option<String>,
+}
 
-    #[serde(default)]
-    pub extra_args: Vec<String>,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CommandsConfig {
+    /// Which command to run by default (when no subcommand given)
+    #[serde(default = "default_command")]
+    pub default: String,
+
+    /// Flattened map of command name to config
+    #[serde(flatten)]
+    pub commands: HashMap<String, CommandConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -202,8 +211,8 @@ fn default_tmpfs_size() -> String {
     "1m".to_string()
 }
 
-fn default_max_turns() -> u64 {
-    99999999
+fn default_command() -> String {
+    "claude".to_string()
 }
 
 fn default_nodejs_version() -> String {
@@ -305,13 +314,89 @@ impl Default for GitConfig {
     }
 }
 
-impl Default for ClaudeConfig {
+impl CommandsConfig {
+    /// Resolve a command by name, following references recursively
+    /// Returns (resolved_executable, resolved_config)
+    pub fn resolve<'a>(&'a self, name: &str) -> Result<(String, &'a CommandConfig)> {
+        let mut current_name = name;
+        let mut visited = std::collections::HashSet::new();
+        const MAX_DEPTH: usize = 10;
+
+        for _ in 0..MAX_DEPTH {
+            if !visited.insert(current_name) {
+                return Err(ClaudepodError::Other(format!(
+                    "Circular command reference detected: {}",
+                    current_name
+                )));
+            }
+
+            let config = self.commands.get(current_name).ok_or_else(|| {
+                ClaudepodError::Other(format!("Command not found: {}", current_name))
+            })?;
+
+            // If this command references another, follow it
+            if let Some(ref cmd_ref) = config.command {
+                current_name = cmd_ref;
+            } else {
+                // No reference, use current name as executable
+                return Ok((current_name.to_string(), config));
+            }
+        }
+
+        Err(ClaudepodError::Other(format!(
+            "Command reference depth exceeded {} (possible cycle)",
+            MAX_DEPTH
+        )))
+    }
+}
+
+impl Default for CommandsConfig {
     fn default() -> Self {
+        let mut commands = HashMap::new();
+
+        // Default claude command
+        commands.insert(
+            "claude".to_string(),
+            CommandConfig {
+                install: Some(
+                    "RUN mkdir -p /home/code/.npm-global && \\\n    npm config set prefix /home/code/.npm-global && \\\n    npm install --silent -g @anthropic-ai/claude-code".to_string()
+                ),
+                args: "--dangerously-skip-permissions --max-turns 99999999".to_string(),
+                command: None,
+            },
+        );
+
+        // Shell commands
+        commands.insert(
+            "shell".to_string(),
+            CommandConfig {
+                install: None,
+                args: String::new(),
+                command: Some("bash".to_string()),
+            },
+        );
+
+        commands.insert(
+            "bash".to_string(),
+            CommandConfig {
+                install: None,
+                args: String::new(),
+                command: None,
+            },
+        );
+
+        commands.insert(
+            "zsh".to_string(),
+            CommandConfig {
+                install: None,
+                args: String::new(),
+                command: None,
+            },
+        );
+
         Self {
-            install_at_startup: true,
-            skip_permissions: true,
-            max_turns: 99999999,
-            extra_args: vec![],
+            default: "claude".to_string(),
+            commands,
         }
     }
 }
@@ -440,7 +525,7 @@ impl ClaudepodConfig {
                 env
             },
             git: GitConfig::default(),
-            claude: ClaudeConfig::default(),
+            cmd: CommandsConfig::default(),
             dependencies: DependenciesConfig::default(),
             shell: ShellConfig::default(),
         }
