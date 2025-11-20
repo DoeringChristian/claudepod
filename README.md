@@ -1,9 +1,12 @@
 # claudepod
 
-A CLI tool for managing Claude Code Docker/Podman instances with declarative TOML configuration.
+A CLI tool for managing containerized development environments with declarative TOML configuration. Define custom commands to run any tools in reproducible Docker/Podman containers.
 
 ## Features
 
+- **Custom Command System**: Define any command to run in containers (Claude Code, shells, custom tools)
+- **Command Aliases**: Commands can reference other commands for flexible workflows
+- **Persistent Containers**: One container per project for fast startup and state preservation
 - **Declarative Configuration**: Define your environment in a `claudepod.toml` file
 - **Lock File Protection**: Hash-based lock file (similar to Cargo.lock) ensures builds are reproducible
 - **Podman First**: Uses Podman by default, with Docker support available
@@ -42,16 +45,19 @@ claudepod build
 
 This generates a Dockerfile and entrypoint script in `.claudepod/`, builds the image, and creates a lock file.
 
-4. **Run Claude Code**:
+4. **Run commands**:
 ```bash
-claudepod run
+claudepod                     # Run the default command (claude)
+claudepod claude              # Explicitly run Claude Code
+claudepod shell               # Open interactive shell
+claudepod bash                # Open bash shell
 ```
 
-Or pass custom arguments:
+Pass arguments to commands:
 ```bash
-claudepod run --resume         # Resume last conversation
-claudepod run -d              # Debug mode
-claudepod shell               # Open interactive shell
+claudepod claude --resume     # Resume last conversation
+claudepod claude -d           # Debug mode
+claudepod shell zsh           # Run zsh instead of bash
 ```
 
 ## Container Persistence
@@ -76,47 +82,30 @@ Instead, when configuration and container are out of sync:
 
 Claudepod uses different working directories depending on the command:
 
-- **Claude Code** (`claudepod run`): Runs in the project directory (where `claudepod.toml` is located)
-- **Shell** (`claudepod shell`): Runs in your current working directory
-- **Custom commands**: Run in your current working directory
+- **Non-shell commands** (e.g., `claudepod claude`): Run in the project directory (where `claudepod.toml` is located)
+- **Shell commands** (e.g., `claudepod shell`, `claudepod bash`): Run in your current working directory
+- **Custom commands**: Run in your current working directory (unless the command is a shell)
 
 This allows Claude to work with your project files while letting you navigate freely when using the shell.
 
 ## Commands
 
-### `claudepod init`
-Initialize a new `claudepod.toml` configuration file.
+### Built-in Commands
+
+#### `claudepod init`
+Initialize a new `claudepod.toml` configuration file with default commands.
 
 Options:
 - `-f, --force`: Overwrite existing configuration file
 
-### `claudepod build`
+#### `claudepod build`
 Build a container image from `claudepod.toml`.
 
 Options:
 - `-f, --force`: Force rebuild even if not needed
 - `--no-lock`: Skip updating the lock file
 
-### `claudepod run [ARGS...]`
-Run Claude Code in a container.
-
-Options:
-- `--skip-check`: Skip checking if rebuild is needed
-- `[ARGS...]`: Arguments to pass to the container/Claude
-
-### `claudepod shell [SHELL]`
-Open an interactive shell in the container.
-
-Options:
-- `[SHELL]`: Shell to run (default: bash)
-
-Examples:
-```bash
-claudepod shell          # Open bash in container
-claudepod shell zsh      # Open zsh in container
-```
-
-### `claudepod reset`
+#### `claudepod reset`
 Remove the persistent container and recreate it on next run.
 
 Use this when:
@@ -127,14 +116,44 @@ Use this when:
 Example:
 ```bash
 claudepod reset         # Remove container
-claudepod run           # Creates fresh container
+claudepod               # Creates fresh container
 ```
 
-### `claudepod check`
+#### `claudepod check`
 Check configuration and lock file status.
 
 Options:
 - `-v, --verbose`: Show detailed configuration information
+
+### Custom Commands
+
+Custom commands are defined in `claudepod.toml` under the `[cmd]` section. Run them with:
+
+```bash
+claudepod <command_name> [ARGS...]
+```
+
+The arguments are passed through to the command running in the container.
+
+#### Default Commands
+
+When you run `claudepod init`, several default commands are created:
+
+- **`claude`**: Run Claude Code in the container
+- **`shell`**: Open an interactive bash shell (alias for `bash`)
+- **`bash`**: Open a bash shell
+- **`zsh`**: Open a zsh shell
+
+Examples:
+```bash
+claudepod                     # Run the default command (claude)
+claudepod claude --resume     # Run Claude with arguments
+claudepod shell               # Open bash shell
+claudepod bash                # Open bash shell explicitly
+claudepod zsh                 # Open zsh shell
+```
+
+You can define your own commands or override the defaults in `claudepod.toml`. See the Configuration section for details.
 
 ## Configuration
 
@@ -147,6 +166,74 @@ base_image = "nvidia/cuda:12.6.1-runtime-ubuntu25.04"
 user = "code"
 home_dir = "/home/code"
 work_dir = "/home/code/work"
+```
+
+### Custom Commands
+
+Define custom commands to run in the container under the `[cmd]` section:
+
+```toml
+[cmd]
+default = "claude"  # Command to run when just "claudepod" is called
+
+[cmd.claude]
+install = "npm install -g @anthropic-ai/claude-code"
+args = ""
+
+[cmd.bash]
+args = ""
+
+[cmd.shell]
+command = "bash"  # Reference another command
+
+[cmd.python]
+args = ""
+
+[cmd.mycustomtool]
+install = "pip install mycustomtool"
+args = "--verbose"
+```
+
+**Command Fields:**
+- `install` (optional): Shell command to run during image build to install the command
+- `args` (optional): Default arguments to pass to the command
+- `command` (optional): Reference another command (creates an alias)
+
+**Command Resolution:**
+When you run `claudepod mycommand`, claudepod:
+1. Looks up `mycommand` in `[cmd]` section
+2. If `command` field exists, follows the reference (supports chaining, max depth 10)
+3. Executes the resolved command with configured `args` + user-provided arguments
+
+**Examples:**
+
+```toml
+# Simple command
+[cmd.python]
+args = ""
+
+# Command with installation
+[cmd.rg]
+install = "apt-get install -y ripgrep"
+args = ""
+
+# Command alias
+[cmd.py]
+command = "python"
+
+# Complex tool with default args
+[cmd.myserver]
+install = "npm install -g my-dev-server"
+args = "--port 8080 --watch"
+```
+
+Usage:
+```bash
+claudepod python script.py        # Runs: python script.py
+claudepod rg "pattern" src/       # Runs: rg pattern src/
+claudepod py                      # Runs: python (aliased)
+claudepod myserver                # Runs: my-dev-server --port 8080 --watch
+claudepod myserver --port 3000    # Runs: my-dev-server --port 8080 --watch --port 3000
 ```
 
 ### Docker/Podman Settings
@@ -232,15 +319,6 @@ n = "ninja"
 gs = "git status"
 ```
 
-### Claude Settings
-```toml
-[claude]
-install_at_startup = true
-skip_permissions = false
-max_turns = 99999999
-extra_args = []
-```
-
 ## Lock File
 
 The `claudepod.lock` file is automatically generated and tracks:
@@ -293,13 +371,68 @@ apt = ["python3", "python3-pip", "git", "gosu", "sudo"]
 pip = ["torch", "transformers", "numpy", "pandas"]
 ```
 
+## Migration Guide
+
+### Migrating from Pre-1.0 (Claude-specific) Version
+
+If you have an older `claudepod.toml` with a `[claude]` section, you need to migrate to the new `[cmd]` command system.
+
+**Old configuration:**
+```toml
+[claude]
+install_at_startup = true
+skip_permissions = false
+max_turns = 99999999
+extra_args = []
+```
+
+**New configuration:**
+```toml
+[cmd]
+default = "claude"
+
+[cmd.claude]
+install = "npm install -g @anthropic-ai/claude-code"
+args = ""
+
+[cmd.bash]
+args = ""
+
+[cmd.shell]
+command = "bash"
+
+[cmd.zsh]
+args = ""
+```
+
+**Key changes:**
+1. The `[claude]` section is removed entirely
+2. Claude Code is now defined as a command in `[cmd.claude]`
+3. You specify the installation command explicitly in the `install` field
+4. Default arguments go in the `args` field (previously `extra_args`)
+5. The `install_at_startup`, `skip_permissions`, and `max_turns` fields are removed (configure these via `args` if needed)
+
+**Command changes:**
+- `claudepod run` → `claudepod` or `claudepod claude`
+- `claudepod run --resume` → `claudepod claude --resume`
+- `claudepod shell` → `claudepod shell` (unchanged, but now a regular command)
+- `claudepod shell zsh` → `claudepod zsh`
+
+**Migration steps:**
+1. Back up your current `claudepod.toml`
+2. Run `claudepod init --force` to generate a new config with the default command structure
+3. Manually copy over your custom settings (packages, volumes, environment variables, etc.)
+4. Run `claudepod build` to rebuild with the new configuration
+5. Run `claudepod reset` to recreate your container
+6. Test with `claudepod` to verify everything works
+
 ## Workflow
 
 1. **Make changes** to `claudepod.toml`
 2. **Check status**: Run `claudepod check` to see if rebuild is needed
 3. **Rebuild image**: Run `claudepod build` to rebuild with new configuration
 4. **Reset container**: Run `claudepod reset` to remove old container (if warned about mismatch)
-5. **Run Claude**: Run `claudepod run` to start Claude Code
+5. **Run commands**: Run `claudepod` or `claudepod <command>` to execute your commands
 6. The container persists across runs for better performance
 7. Changes made inside the container (installed packages, files) are preserved
 
