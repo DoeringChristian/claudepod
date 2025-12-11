@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use tera::{Context, Tera};
 
-use crate::config::ClaudepodConfig;
+use crate::profile::Profile;
 use crate::error::Result;
 
 const DOCKERFILE_TEMPLATE: &str = include_str!("../templates/Dockerfile.tera");
@@ -25,7 +25,7 @@ impl Generator {
     }
 
     /// Generate Dockerfile and entrypoint script from configuration
-    pub fn generate(&self, config: &ClaudepodConfig, output_dir: &Path) -> Result<()> {
+    pub fn generate(&self, config: &Profile, output_dir: &Path) -> Result<()> {
         // Create output directory if it doesn't exist
         fs::create_dir_all(output_dir)?;
 
@@ -58,7 +58,7 @@ impl Generator {
     }
 
     /// Build template context from configuration
-    fn build_context(&self, config: &ClaudepodConfig) -> Context {
+    fn build_context(&self, config: &Profile) -> Context {
         let mut context = Context::new();
 
         // Container config
@@ -129,8 +129,7 @@ impl Default for Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ClaudepodConfig;
-    use std::path::PathBuf;
+    use crate::profile::Profile;
     use tempfile::TempDir;
 
     #[test]
@@ -142,7 +141,7 @@ mod tests {
     #[test]
     fn test_generate_files() {
         let generator = Generator::new().unwrap();
-        let config = ClaudepodConfig::default();
+        let config = Profile::default();
         let temp_dir = TempDir::new().unwrap();
 
         let result = generator.generate(&config, temp_dir.path());

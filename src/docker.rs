@@ -2,9 +2,9 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::config::ClaudepodConfig;
 use crate::error::{ClaudepodError, Result};
-use crate::lock::LockFile;
+use crate::profile::Profile;
+use crate::state::ProjectEntry;
 
 pub struct DockerClient;
 
@@ -82,54 +82,39 @@ impl DockerClient {
         Self::get_image_id(image_tag, runtime).is_ok()
     }
 
-    /// Run a container (using persistent containers)
+    /// Run a command in a container for a project
     pub fn run(
-        config: &ClaudepodConfig,
-        lock: &LockFile,
+        profile: &Profile,
+        entry: &ProjectEntry,
         command_name: &str,
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
     ) -> Result<()> {
-        let runtime = &config.docker.container_runtime;
-        let container_name = Self::container_name(project_dir);
+        let runtime = &profile.docker.container_runtime;
+        let container_name = &entry.container_name;
 
         // Check if container exists
-        let container_exists = Self::container_exists(&container_name, runtime);
+        let container_exists = Self::container_exists(container_name, runtime);
 
         if container_exists {
-            // Check if container is using the current image
-            let container_image = Self::get_container_image(&container_name, runtime)?;
-            let expected_image = lock.image_id.as_ref().ok_or_else(|| {
-                ClaudepodError::Docker("Image ID not found in lock file".to_string())
-            })?;
-
-            // Compare image IDs (container returns full ID, lock file has truncated ID)
-            if !container_image.starts_with(expected_image) {
-                // Image has changed - warn user instead of auto-recreating
-                println!("⚠ Warning: Your claudepod.toml configuration has changed since this container was created.");
-                println!("   The container is using an older configuration.");
-                println!("   Run 'claudepod reset' to recreate the container with the new configuration.");
-                println!();
-            }
-
-            // Start container if needed (regardless of config mismatch)
-            if !Self::container_is_running(&container_name, runtime) {
+            // Start container if needed
+            if !Self::container_is_running(container_name, runtime) {
                 println!("Starting container...");
-                Self::start_container(&container_name, runtime)?;
+                Self::start_container(container_name, runtime)?;
             }
         } else {
             // Create new container
             println!("Creating container: {}", container_name);
-            Self::create_container(config, lock, project_dir, &container_name)?;
+            Self::create_container(profile, &entry.image_tag, project_dir, container_name)?;
             println!("Starting container...");
-            Self::start_container(&container_name, runtime)?;
+            Self::start_container(container_name, runtime)?;
         }
 
         // Execute command in the running container
         Self::exec_in_container(
-            config,
-            &container_name,
+            profile,
+            container_name,
             command_name,
             args,
             project_dir,
@@ -138,18 +123,18 @@ impl DockerClient {
     }
 
     /// Create a persistent container
-    fn create_container(
-        config: &ClaudepodConfig,
-        lock: &LockFile,
+    pub fn create_container(
+        profile: &Profile,
+        image_tag: &str,
         project_dir: &Path,
         container_name: &str,
     ) -> Result<()> {
-        let runtime = &config.docker.container_runtime;
+        let runtime = &profile.docker.container_runtime;
         let mut cmd = Command::new(runtime);
         cmd.args(["create", "--name", container_name]);
 
         // Interactive terminal
-        if config.docker.interactive {
+        if profile.docker.interactive {
             cmd.arg("-it");
         }
 
@@ -162,13 +147,13 @@ impl DockerClient {
         cmd.arg("-e").arg(format!("UID={}", Self::get_uid()));
         cmd.arg("-e").arg(format!("GID={}", Self::get_gid()));
 
-        // Always mount the directory containing claudepod.toml to the same path in container
+        // Always mount the project directory to the same path in container
         let project_dir_str = project_dir.to_string_lossy();
         cmd.arg("-v")
             .arg(format!("{}:{}", project_dir_str, project_dir_str));
 
-        // Mount additional volumes from config
-        for volume in &config.docker.volumes {
+        // Mount additional volumes from profile
+        for volume in &profile.docker.volumes {
             let host_path = shellexpand::full(&volume.host)
                 .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
 
@@ -183,7 +168,7 @@ impl DockerClient {
         }
 
         // Tmpfs mounts
-        for tmpfs in &config.docker.tmpfs {
+        for tmpfs in &profile.docker.tmpfs {
             let mut tmpfs_arg = format!("{}:size={}", tmpfs.path, tmpfs.size);
             if tmpfs.readonly {
                 tmpfs_arg.push_str(",ro");
@@ -192,17 +177,17 @@ impl DockerClient {
         }
 
         // GPU support
-        if config.docker.enable_gpu {
-            cmd.arg("--gpus").arg(&config.docker.gpu_driver);
+        if profile.docker.enable_gpu {
+            cmd.arg("--gpus").arg(&profile.docker.gpu_driver);
         }
 
         // Extra Docker arguments
-        for arg in &config.docker.extra_args {
+        for arg in &profile.docker.extra_args {
             cmd.arg(arg);
         }
 
         // Image tag
-        cmd.arg(&lock.image_tag);
+        cmd.arg(image_tag);
 
         // Keep container running with a sleep infinity command
         cmd.arg("sleep").arg("infinity");
@@ -224,21 +209,21 @@ impl DockerClient {
 
     /// Execute a command in a running container
     fn exec_in_container(
-        config: &ClaudepodConfig,
+        profile: &Profile,
         container_name: &str,
         command_name: &str,
         args: &[String],
-        project_dir: &Path,
+        _project_dir: &Path,
         working_dir: &Path,
     ) -> Result<()> {
         // Resolve the command
-        let (executable, cmd_config) = config.cmd.resolve(command_name)?;
+        let (executable, cmd_config) = profile.cmd.resolve(command_name)?;
 
-        let runtime = &config.docker.container_runtime;
+        let runtime = &profile.docker.container_runtime;
         let mut cmd = Command::new(runtime);
         cmd.args(["exec", "-it"]);
 
-        // Set working directory - shells run in current dir, others in project dir
+        // Set working directory
         let work_dir = working_dir.to_string_lossy();
         cmd.arg("-w").arg(work_dir.as_ref());
 
@@ -393,6 +378,7 @@ impl DockerClient {
     }
 
     /// Get the image ID that a container is using
+    #[allow(dead_code)]
     pub fn get_container_image(container_name: &str, runtime: &str) -> Result<String> {
         let output = Command::new(runtime)
             .args(["inspect", "--format", "{{.Image}}", container_name])
@@ -421,5 +407,24 @@ mod tests {
         // Just verify they return something reasonable
         assert!(uid > 0 || cfg!(not(unix)));
         assert!(gid > 0 || cfg!(not(unix)));
+    }
+
+    #[test]
+    fn test_container_name() {
+        let path1 = Path::new("/home/user/project1");
+        let path2 = Path::new("/home/user/project2");
+
+        let name1 = DockerClient::container_name(path1);
+        let name2 = DockerClient::container_name(path2);
+
+        // Names should be different for different paths
+        assert_ne!(name1, name2);
+
+        // Names should be consistent
+        assert_eq!(name1, DockerClient::container_name(path1));
+
+        // Names should have the expected format
+        assert!(name1.starts_with("claudepod-"));
+        assert_eq!(name1.len(), "claudepod-".len() + 12);
     }
 }

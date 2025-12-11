@@ -42,5 +42,8 @@ shellexpand = "3.1"
 # Unix system calls
 libc = "0.2"
 
+# XDG directory paths
+dirs = "5.0"
+
 [dev-dependencies]
 tempfile = "3.10"

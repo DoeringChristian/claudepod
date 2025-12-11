@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use crate::error::{ClaudepodError, Result};
+use crate::paths;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ClaudepodConfig {
+pub struct Profile {
     #[serde(default)]
     pub container: ContainerConfig,
 
@@ -441,8 +443,24 @@ impl Default for ShellConfig {
     }
 }
 
-impl ClaudepodConfig {
-    /// Load configuration from a TOML file
+impl Profile {
+    /// Load a profile by name from the profiles directory
+    /// e.g., load("default") loads ~/.config/claudepod/profiles/default.toml
+    pub fn load(name: &str) -> Result<Self> {
+        let profile_path = paths::profiles_dir().join(format!("{}.toml", name));
+
+        if !profile_path.exists() {
+            return Err(ClaudepodError::ProfileNotFound(format!(
+                "Profile '{}' not found at {}",
+                name,
+                profile_path.display()
+            )));
+        }
+
+        Self::from_file(&profile_path)
+    }
+
+    /// Load profile from a TOML file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(&path).map_err(|e| {
             ClaudepodError::FileNotFound(format!("{}: {}", path.as_ref().display(), e))
@@ -450,14 +468,14 @@ impl ClaudepodConfig {
         Self::from_str(&content)
     }
 
-    /// Parse configuration from a TOML string
+    /// Parse profile from a TOML string
     pub fn from_str(content: &str) -> Result<Self> {
-        let config: ClaudepodConfig = toml::from_str(content)?;
-        config.validate()?;
-        Ok(config)
+        let profile: Profile = toml::from_str(content)?;
+        profile.validate()?;
+        Ok(profile)
     }
 
-    /// Validate the configuration
+    /// Validate the profile
     pub fn validate(&self) -> Result<()> {
         // Validate container runtime
         let valid_runtimes = ["docker", "podman"];
@@ -507,12 +525,57 @@ impl ClaudepodConfig {
         Ok(())
     }
 
-    /// Serialize configuration to TOML string (normalized for hashing)
+    /// Serialize profile to TOML string (normalized for hashing)
     pub fn to_toml_string(&self) -> Result<String> {
         Ok(toml::to_string_pretty(self)?)
     }
 
-    /// Create a default configuration
+    /// Compute SHA256 hash of the profile configuration
+    pub fn compute_hash(&self) -> Result<String> {
+        let toml_str = self.to_toml_string()?;
+        let mut hasher = Sha256::new();
+        hasher.update(toml_str.as_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    /// List available profile names (without .toml extension)
+    pub fn list_available() -> Result<Vec<String>> {
+        let profiles_dir = paths::profiles_dir();
+        let mut profiles = Vec::new();
+
+        if profiles_dir.exists() {
+            for entry in fs::read_dir(&profiles_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "toml") {
+                    if let Some(stem) = path.file_stem() {
+                        profiles.push(stem.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        profiles.sort();
+        Ok(profiles)
+    }
+
+    /// Ensure the default profile exists, creating it if not
+    pub fn ensure_default() -> Result<()> {
+        let default_path = paths::profiles_dir().join("default.toml");
+
+        if !default_path.exists() {
+            // Ensure directory exists
+            fs::create_dir_all(paths::profiles_dir())?;
+
+            let default = Self::default();
+            let toml_content = default.to_toml_string()?;
+            fs::write(&default_path, toml_content)?;
+        }
+
+        Ok(())
+    }
+
+    /// Create a default profile
     pub fn default() -> Self {
         Self {
             container: ContainerConfig::default(),
@@ -537,18 +600,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = ClaudepodConfig::default();
-        assert_eq!(config.container.user, "code");
-        assert_eq!(config.container.base_image, "ubuntu:25.04");
-        assert!(config.validate().is_ok());
+    fn test_default_profile() {
+        let profile = Profile::default();
+        assert_eq!(profile.container.user, "code");
+        assert_eq!(profile.container.base_image, "ubuntu:25.04");
+        assert!(profile.validate().is_ok());
     }
 
     #[test]
-    fn test_config_serialization() {
-        let config = ClaudepodConfig::default();
-        let toml_str = config.to_toml_string().unwrap();
-        let parsed = ClaudepodConfig::from_str(&toml_str).unwrap();
-        assert_eq!(config.container.user, parsed.container.user);
+    fn test_profile_serialization() {
+        let profile = Profile::default();
+        let toml_str = profile.to_toml_string().unwrap();
+        let parsed = Profile::from_str(&toml_str).unwrap();
+        assert_eq!(profile.container.user, parsed.container.user);
+    }
+
+    #[test]
+    fn test_profile_hash() {
+        let profile = Profile::default();
+        let hash = profile.compute_hash().unwrap();
+        assert_eq!(hash.len(), 64); // SHA256 hex string
+    }
+
+    #[test]
+    fn test_command_resolution() {
+        let profile = Profile::default();
+
+        // Direct command
+        let (exec, _) = profile.cmd.resolve("bash").unwrap();
+        assert_eq!(exec, "bash");
+
+        // Alias
+        let (exec, _) = profile.cmd.resolve("shell").unwrap();
+        assert_eq!(exec, "bash");
     }
 }

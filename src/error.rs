@@ -27,6 +27,15 @@ pub enum ClaudepodError {
     #[error("File not found: {0}")]
     FileNotFound(String),
 
+    #[error("Project not found: {0}")]
+    ProjectNotFound(String),
+
+    #[error("Profile not found: {0}")]
+    ProfileNotFound(String),
+
+    #[error("No container for this project. Run 'claudepod create <profile>' first.")]
+    ContainerNotCreated,
+
     #[error("{0}")]
     Other(String),
 }

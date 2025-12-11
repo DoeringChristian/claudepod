@@ -1,64 +1,65 @@
-mod config;
 mod docker;
 mod error;
 mod generator;
-mod lock;
+mod paths;
+mod profile;
+mod state;
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use config::ClaudepodConfig;
 use docker::DockerClient;
 use error::{ClaudepodError, Result};
 use generator::Generator;
-use lock::{LockFile, LockManager};
-
-const CONFIG_FILE: &str = "claudepod.toml";
-const BUILD_DIR: &str = ".claudepod";
+use profile::Profile;
+use state::{GlobalState, ProjectEntry};
 
 #[derive(Parser)]
 #[command(name = "claudepod")]
-#[command(about = "CLI tool for managing Claude Code Docker instances", long_about = None)]
+#[command(about = "CLI tool for managing containerized development environments", long_about = None)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Arguments to pass to Claude (when no subcommand specified)
+    /// Arguments to pass to the default command (when no subcommand specified)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new claudepod.toml configuration file
-    Init {
-        /// Overwrite existing configuration file
+    /// Create a container for the current directory using a profile
+    Create {
+        /// Profile name to use (from ~/.config/claudepod/profiles/)
+        #[arg(default_value = "default")]
+        profile: String,
+
+        /// Force recreation if container already exists
         #[arg(short, long)]
         force: bool,
     },
 
-    /// Build Docker image from claudepod.toml
-    Build {
-        /// Force rebuild even if not needed
-        #[arg(short, long)]
-        force: bool,
+    /// Run a command in the container for current project
+    Run {
+        /// Command name (defined in profile) or executable
+        command: Option<String>,
 
-        /// Skip updating the lock file
-        #[arg(long)]
-        no_lock: bool,
+        /// Arguments to pass to the command
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
-    /// Check configuration and lock file status
-    Check {
-        /// Show verbose output
+    /// Remove the container for current project
+    Reset,
+
+    /// List all tracked projects and their containers
+    List {
+        /// Show detailed information
         #[arg(short, long)]
         verbose: bool,
     },
-
-    /// Remove the persistent container and create a new one
-    Reset,
 }
 
 fn main() {
@@ -71,305 +72,250 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Commands::Init { force }) => cmd_init(force),
-        Some(Commands::Build { force, no_lock }) => cmd_build(force, no_lock),
-        Some(Commands::Check { verbose }) => cmd_check(verbose),
-        Some(Commands::Reset) => cmd_reset(),
-        None => {
-            // Check if first arg is a defined command, otherwise use default
-            let (config, _config_dir) = load_config()?;
+    // Ensure directories exist
+    paths::ensure_dirs()?;
 
-            if let Some(first_arg) = cli.args.first() {
-                // Check if it's a defined command
-                if config.cmd.commands.contains_key(first_arg.as_str()) {
-                    // Run the named command with remaining args
-                    let command_name = first_arg.clone();
-                    let args = cli.args[1..].to_vec();
-                    return cmd_run_command(&command_name, args);
-                }
+    match cli.command {
+        Some(Commands::Create { profile, force }) => cmd_create(&profile, force),
+        Some(Commands::Reset) => cmd_reset(),
+        Some(Commands::List { verbose }) => cmd_list(verbose),
+        Some(Commands::Run { command, args }) => {
+            let cmd_name = command.unwrap_or_else(|| "claude".to_string());
+            cmd_run(&cmd_name, args)
+        }
+        None => {
+            // Default behavior: run default command with all args
+            // Check if first arg is a known command name
+            cmd_run_with_args(cli.args)
+        }
+    }
+}
+
+fn cmd_create(profile_name: &str, force: bool) -> Result<()> {
+    // 1. Get current directory (canonicalized)
+    let project_dir = std::env::current_dir()?.canonicalize()?;
+
+    // 2. Load global state
+    let mut state = GlobalState::load()?;
+
+    // 3. Check if project already tracked
+    if let Some((existing_path, entry)) = state.find_project(&project_dir) {
+        if existing_path == project_dir {
+            if !force {
+                println!("Project already has a container: {}", entry.container_name);
+                println!("Profile: {}", entry.profile_name);
+                println!("Created: {}", entry.created_at.format("%Y-%m-%d %H:%M:%S"));
+                println!("\nUse --force to recreate.");
+                return Ok(());
             }
 
-            // Not a command name, run default command with all args
-            cmd_run_command(&config.cmd.default, cli.args)
+            // Remove existing container
+            println!("Removing existing container: {}", entry.container_name);
+            let old_profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
+            let _ = DockerClient::remove_container(&entry.container_name, &old_profile.docker.container_runtime);
+            state.remove_project(&project_dir);
         }
     }
-}
 
-fn cmd_init(force: bool) -> Result<()> {
-    let config_path = Path::new(CONFIG_FILE);
+    // 4. Load profile (ensure default exists first)
+    Profile::ensure_default()?;
 
-    if config_path.exists() && !force {
-        return Err(ClaudepodError::Other(format!(
-            "{} already exists. Use --force to overwrite.",
-            CONFIG_FILE
-        )));
-    }
+    let profile = Profile::load(profile_name).map_err(|_| {
+        let available = Profile::list_available().unwrap_or_default();
+        ClaudepodError::ProfileNotFound(format!(
+            "Profile '{}' not found.\nAvailable profiles: {}\nProfiles directory: {}",
+            profile_name,
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            },
+            paths::profiles_dir().display()
+        ))
+    })?;
 
-    let default_config = ClaudepodConfig::default();
-    let toml_content = default_config.to_toml_string()?;
-
-    fs::write(config_path, toml_content)?;
-
-    println!("Created {} with default configuration", CONFIG_FILE);
-    println!("\nNext steps:");
-    println!("  1. Edit {} to customize your environment", CONFIG_FILE);
-    println!("  2. Run 'claudepod build' to build the Docker image");
-    println!("  3. Run 'claudepod run' to start Claude Code");
-
-    Ok(())
-}
-
-fn cmd_build(force: bool, no_lock: bool) -> Result<()> {
-    // Load configuration
-    let (config, config_dir) = load_config()?;
-
-    // Check if rebuild is needed (unless force)
-    if !force {
-        let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
-        if !needs_rebuild {
-            println!("Image is up to date. Use --force to rebuild anyway.");
-            return Ok(());
-        }
-        if let Some(reason) = reason {
-            println!("Rebuild needed: {}", reason);
-        }
-    } else {
-        println!("Force rebuild requested");
-    }
-
-    // Create build directory in the same location as claudepod.toml
-    let build_dir = config_dir.join(BUILD_DIR);
+    // 5. Generate Dockerfile
+    let build_dir = paths::build_dir();
     fs::create_dir_all(&build_dir)?;
 
-    // Generate Dockerfile and entrypoint
-    println!("Generating Dockerfile and entrypoint script...");
+    println!("Generating Dockerfile...");
     let generator = Generator::new()?;
-    generator.generate(&config, &build_dir)?;
+    generator.generate(&profile, &build_dir)?;
 
-    // Compute config hash for image tag
-    let config_hash = LockFile::compute_config_hash(&config)?;
-    let short_hash = &config_hash[..12]; // Use first 12 chars like Docker
+    // 6. Compute image tag from profile hash
+    let config_hash = profile.compute_hash()?;
+    let short_hash = &config_hash[..12];
     let image_tag = format!("claudepod:{}", short_hash);
 
-    println!("Using image tag: {}", image_tag);
+    // 7. Build image (if not exists or force)
+    let runtime = &profile.docker.container_runtime;
+    let image_id = if !DockerClient::image_exists(&image_tag, runtime) || force {
+        println!("Building image: {}", image_tag);
+        DockerClient::build(&build_dir, &image_tag, runtime)?
+    } else {
+        println!("Reusing existing image: {}", image_tag);
+        DockerClient::get_image_id(&image_tag, runtime)?
+    };
 
-    // Build container image
-    let runtime = &config.docker.container_runtime;
-    let image_id = DockerClient::build(&build_dir, &image_tag, runtime)?;
+    // 8. Create container
+    let container_name = DockerClient::container_name(&project_dir);
+    println!("Creating container: {}", container_name);
+    DockerClient::create_container(&profile, &image_tag, &project_dir, &container_name)?;
 
-    // Update lock file
-    if !no_lock {
-        let mut lock = LockFile::new(&config)?;
-        lock.image_tag = image_tag;
-        lock.set_image_id(image_id);
-        LockManager::save(&lock, &config_dir)?;
-        let lock_path = LockManager::lock_path(&config_dir);
-        println!("Updated lock file: {}", lock_path.display());
-    }
+    // 9. Update state
+    let entry = ProjectEntry {
+        profile_name: profile_name.to_string(),
+        container_name: container_name.clone(),
+        image_tag,
+        image_id: Some(image_id),
+        config_hash,
+        created_at: Utc::now(),
+        last_used: None,
+    };
+    state.set_project(project_dir, entry);
+    state.save()?;
 
-    println!("\nBuild complete! Run 'claudepod run' to start the container.");
+    println!("\nContainer created successfully!");
+    println!("Run 'claudepod' to start the default command.");
 
     Ok(())
 }
 
-fn cmd_run_command(command_name: &str, args: Vec<String>) -> Result<()> {
-    // Load configuration
-    let (config, config_dir) = load_config()?;
+fn cmd_run(command_name: &str, args: Vec<String>) -> Result<()> {
+    // 1. Get current directory
+    let current_dir = std::env::current_dir()?;
+    let canonical_dir = current_dir.canonicalize().unwrap_or_else(|_| current_dir.clone());
 
-    // Load lock file (should exist now after potential rebuild)
-    let lock_path = LockManager::lock_path(&config_dir);
-    let lock = match LockFile::from_file(&lock_path) {
-        Ok(lock) => lock,
-        Err(_) => {
-            cmd_build(false, false)?;
-            LockFile::from_file(&lock_path).map_err(|_err| {
-                ClaudepodError::Other(
-                    "Lock file not found. Run 'claudepod build' first.".to_string(),
-                )
-            })?
-        }
-    };
+    // 2. Load state and find project (search upward)
+    let mut state = GlobalState::load()?;
+    let (project_dir, entry) = state
+        .find_project(&canonical_dir)
+        .ok_or(ClaudepodError::ContainerNotCreated)?;
 
-    // Check if image exists
-    let runtime = &config.docker.container_runtime;
-    if !DockerClient::image_exists(&lock.image_tag, runtime) {
-        cmd_build(false, false)?;
-        return Err(ClaudepodError::Docker(format!(
-            "Container image '{}' not found. Run 'claudepod build' first.",
-            lock.image_tag
-        )));
+    let project_dir = project_dir.clone();
+    let mut entry = entry.clone();
+
+    // 3. Load profile for this project
+    let profile = Profile::load(&entry.profile_name).map_err(|_| {
+        ClaudepodError::ProfileNotFound(format!(
+            "Profile '{}' not found. The profile used to create this container may have been deleted.",
+            entry.profile_name
+        ))
+    })?;
+
+    // 4. Update last_used timestamp
+    entry.last_used = Some(Utc::now());
+    state.set_project(project_dir.clone(), entry.clone());
+    state.save()?;
+
+    // 5. Run command in container
+    DockerClient::run(
+        &profile,
+        &entry,
+        command_name,
+        &args,
+        &project_dir,
+        &current_dir,
+    )
+}
+
+fn cmd_run_with_args(args: Vec<String>) -> Result<()> {
+    if args.is_empty() {
+        return cmd_run("claude", vec![]);
     }
 
-    // Run the container with the specified command
-    let current_dir = std::env::current_dir()
-        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
+    // Check if first arg is a known command name
+    let current_dir = std::env::current_dir()?;
+    let state = GlobalState::load()?;
 
-    DockerClient::run(&config, &lock, command_name, &args, &config_dir, &current_dir)?;
+    if let Some((_, entry)) = state.find_project(&current_dir.canonicalize().unwrap_or(current_dir.clone())) {
+        if let Ok(profile) = Profile::load(&entry.profile_name) {
+            if let Some(first_arg) = args.first() {
+                if profile.cmd.commands.contains_key(first_arg.as_str()) {
+                    let command_name = first_arg.clone();
+                    let remaining_args = args[1..].to_vec();
+                    return cmd_run(&command_name, remaining_args);
+                }
+            }
+        }
+    }
 
-    Ok(())
+    // Default command with all args
+    cmd_run("claude", args)
 }
 
 fn cmd_reset() -> Result<()> {
-    println!("Resetting claudepod container...\n");
+    // 1. Get current directory
+    let current_dir = std::env::current_dir()?;
+    let canonical_dir = current_dir.canonicalize().unwrap_or(current_dir);
 
-    // Load configuration
-    let (config, config_dir) = load_config()?;
+    // 2. Load state and find project
+    let mut state = GlobalState::load()?;
+    let (project_dir, entry) = state
+        .find_project(&canonical_dir)
+        .ok_or(ClaudepodError::ProjectNotFound(
+            "No container found for this project or any parent directory.".to_string(),
+        ))?;
 
-    // Generate container name
-    let container_name = DockerClient::container_name(&config_dir);
-    let runtime = &config.docker.container_runtime;
+    let project_dir = project_dir.clone();
+    let entry = entry.clone();
 
-    // Check if container exists
-    if DockerClient::container_exists(&container_name, runtime) {
-        println!("Removing existing container: {}", container_name);
-        DockerClient::remove_container(&container_name, runtime)?;
-        println!("✓ Container removed");
+    // 3. Load profile to get runtime (use default if profile was deleted)
+    let profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
+    let runtime = &profile.docker.container_runtime;
+
+    // 4. Remove container if exists
+    if DockerClient::container_exists(&entry.container_name, runtime) {
+        println!("Removing container: {}", entry.container_name);
+        DockerClient::remove_container(&entry.container_name, runtime)?;
+        println!("Container removed.");
     } else {
-        println!("No existing container found for this project");
+        println!("Container '{}' does not exist (may have been removed manually).", entry.container_name);
     }
 
-    println!("\nNext time you run 'claudepod run' or 'claudepod shell', a fresh container will be created.");
+    // 5. Remove from state
+    state.remove_project(&project_dir);
+    state.save()?;
+
+    println!("\nProject untracked. Run 'claudepod create <profile>' to create a new container.");
 
     Ok(())
 }
 
-fn cmd_check(verbose: bool) -> Result<()> {
-    println!("Checking claudepod configuration...\n");
+fn cmd_list(verbose: bool) -> Result<()> {
+    let state = GlobalState::load()?;
+    let projects = state.list_projects();
 
-    // Check if config file exists
-    let config_path = match find_config_file() {
-        Ok(path) => path,
-        Err(_) => {
-            println!("❌ Configuration file not found: {}", CONFIG_FILE);
-            println!("   Run 'claudepod init' to create one.");
-            return Ok(());
+    if projects.is_empty() {
+        println!("No tracked projects.");
+        println!("\nRun 'claudepod create <profile>' in a project directory to get started.");
+        println!("Available profiles:");
+        Profile::ensure_default()?;
+        for name in Profile::list_available()? {
+            println!("  - {}", name);
         }
-    };
-    println!("✓ Configuration file: {}", config_path.display());
-
-    // Load and validate config
-    let (config, config_dir) = match load_config() {
-        Ok((c, d)) => {
-            println!("✓ Configuration is valid");
-            (c, d)
-        }
-        Err(e) => {
-            println!("❌ Configuration validation failed: {}", e);
-            return Ok(());
-        }
-    };
-
-    if verbose {
-        println!("\nConfiguration details:");
-        println!("  Container runtime: {}", config.docker.container_runtime);
-        println!("  Base image: {}", config.container.base_image);
-        println!("  User: {}", config.container.user);
-        println!("  GPU enabled: {}", config.docker.enable_gpu);
-        println!(
-            "  Node.js: {}",
-            if config.dependencies.nodejs.enabled {
-                format!("v{}", config.dependencies.nodejs.version)
-            } else {
-                "disabled".to_string()
-            }
-        );
-    }
-
-    // Check lock file
-    let lock_path = LockManager::lock_path(&config_dir);
-    if !LockManager::exists(&lock_path) {
-        println!("\n❌ Lock file not found: {}", lock_path.display());
-        println!("   Run 'claudepod build' to create it.");
-        return Ok(());
-    }
-    println!("\n✓ Lock file: {}", lock_path.display());
-
-    // Load lock file
-    let lock = match LockFile::from_file(&lock_path) {
-        Ok(l) => l,
-        Err(e) => {
-            println!("❌ Failed to read lock file: {}", e);
-            return Ok(());
-        }
-    };
-
-    if verbose {
-        println!("  Created: {}", lock.created_at);
-        println!("  Image tag: {}", lock.image_tag);
-        if let Some(image_id) = &lock.image_id {
-            println!("  Image ID: {}", image_id);
-        }
-    }
-
-    // Check if config has changed
-    match lock.is_config_changed(&config) {
-        Ok(changed) => {
-            if changed {
-                println!("\n⚠ Configuration has changed since last build");
-                println!("   Run 'claudepod build' to rebuild the image.");
-            } else {
-                println!("\n✓ Configuration matches lock file");
-            }
-        }
-        Err(e) => {
-            println!("\n❌ Failed to check configuration: {}", e);
-            return Ok(());
-        }
-    }
-
-    // Check if image exists
-    let runtime = &config.docker.container_runtime;
-    if DockerClient::image_exists(&lock.image_tag, runtime) {
-        println!("✓ Container image exists: {}", lock.image_tag);
-    } else {
-        println!("❌ Container image not found: {}", lock.image_tag);
-        println!("   Run 'claudepod build' to create it.");
         return Ok(());
     }
 
-    // Final status
-    let (needs_rebuild, reason) = LockManager::needs_rebuild(&config, &config_dir)?;
-    if needs_rebuild {
-        println!("\n⚠ Rebuild recommended: {}", reason.unwrap_or_default());
-        println!("   Run 'claudepod build'");
-    } else {
-        println!("\n✓ Everything is up to date!");
-        println!("   Run 'claudepod run' to start Claude Code");
+    println!("Tracked projects:\n");
+
+    for (path, entry) in projects {
+        println!("  {}", path.display());
+        println!("    Container: {}", entry.container_name);
+        println!("    Profile:   {}", entry.profile_name);
+
+        if verbose {
+            println!("    Image:     {}", entry.image_tag);
+            println!(
+                "    Created:   {}",
+                entry.created_at.format("%Y-%m-%d %H:%M:%S")
+            );
+            if let Some(last_used) = &entry.last_used {
+                println!("    Last used: {}", last_used.format("%Y-%m-%d %H:%M:%S"));
+            }
+        }
+        println!();
     }
 
     Ok(())
-}
-
-fn find_config_file() -> Result<PathBuf> {
-    let mut current_dir = std::env::current_dir()
-        .map_err(|e| ClaudepodError::Other(format!("Failed to get current directory: {}", e)))?;
-
-    loop {
-        let config_path = current_dir.join(CONFIG_FILE);
-        if config_path.exists() {
-            return Ok(config_path);
-        }
-
-        // Try to move to parent directory
-        if !current_dir.pop() {
-            // Reached the root directory
-            break;
-        }
-    }
-
-    Err(ClaudepodError::FileNotFound(format!(
-        "{} not found in current directory or any parent directory. Run 'claudepod init' to create it.",
-        CONFIG_FILE
-    )))
-}
-
-fn load_config() -> Result<(ClaudepodConfig, PathBuf)> {
-    let config_path = find_config_file()?;
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| ClaudepodError::Other("Failed to get config directory".to_string()))?
-        .to_path_buf();
-    let config = ClaudepodConfig::from_file(&config_path)?;
-    Ok((config, config_dir))
 }
