@@ -8,6 +8,7 @@ mod state;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::path::PathBuf;
 
 use docker::DockerClient;
 use error::{ClaudepodError, Result};
@@ -60,6 +61,12 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Export the container filesystem to a tar file
+    Save {
+        /// Output file path (default: <container_name>.tar in current directory)
+        output: Option<String>,
+    },
 }
 
 fn main() {
@@ -79,6 +86,7 @@ fn run() -> Result<()> {
         Some(Commands::Create { profile, force }) => cmd_create(&profile, force),
         Some(Commands::Reset) => cmd_reset(),
         Some(Commands::List { verbose }) => cmd_list(verbose),
+        Some(Commands::Save { output }) => cmd_save(output),
         Some(Commands::Run { command, args }) => {
             let cmd_name = command.unwrap_or_else(|| "claude".to_string());
             cmd_run(&cmd_name, args)
@@ -111,8 +119,12 @@ fn cmd_create(profile_name: &str, force: bool) -> Result<()> {
 
             // Remove existing container
             println!("Removing existing container: {}", entry.container_name);
-            let old_profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
-            let _ = DockerClient::remove_container(&entry.container_name, &old_profile.docker.container_runtime);
+            let old_profile =
+                Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
+            let _ = DockerClient::remove_container(
+                &entry.container_name,
+                &old_profile.docker.container_runtime,
+            );
             state.remove_project(&project_dir);
         }
     }
@@ -184,7 +196,9 @@ fn cmd_create(profile_name: &str, force: bool) -> Result<()> {
 fn cmd_run(command_name: &str, args: Vec<String>) -> Result<()> {
     // 1. Get current directory
     let current_dir = std::env::current_dir()?;
-    let canonical_dir = current_dir.canonicalize().unwrap_or_else(|_| current_dir.clone());
+    let canonical_dir = current_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_dir.clone());
 
     // 2. Load state and find project (search upward)
     let mut state = GlobalState::load()?;
@@ -228,7 +242,9 @@ fn cmd_run_with_args(args: Vec<String>) -> Result<()> {
     let current_dir = std::env::current_dir()?;
     let state = GlobalState::load()?;
 
-    if let Some((_, entry)) = state.find_project(&current_dir.canonicalize().unwrap_or(current_dir.clone())) {
+    if let Some((_, entry)) =
+        state.find_project(&current_dir.canonicalize().unwrap_or(current_dir.clone()))
+    {
         if let Ok(profile) = Profile::load(&entry.profile_name) {
             if let Some(first_arg) = args.first() {
                 if profile.cmd.commands.contains_key(first_arg.as_str()) {
@@ -251,11 +267,12 @@ fn cmd_reset() -> Result<()> {
 
     // 2. Load state and find project
     let mut state = GlobalState::load()?;
-    let (project_dir, entry) = state
-        .find_project(&canonical_dir)
-        .ok_or(ClaudepodError::ProjectNotFound(
-            "No container found for this project or any parent directory.".to_string(),
-        ))?;
+    let (project_dir, entry) =
+        state
+            .find_project(&canonical_dir)
+            .ok_or(ClaudepodError::ProjectNotFound(
+                "No container found for this project or any parent directory.".to_string(),
+            ))?;
 
     let project_dir = project_dir.clone();
     let entry = entry.clone();
@@ -270,7 +287,10 @@ fn cmd_reset() -> Result<()> {
         DockerClient::remove_container(&entry.container_name, runtime)?;
         println!("Container removed.");
     } else {
-        println!("Container '{}' does not exist (may have been removed manually).", entry.container_name);
+        println!(
+            "Container '{}' does not exist (may have been removed manually).",
+            entry.container_name
+        );
     }
 
     // 5. Remove from state
@@ -315,6 +335,56 @@ fn cmd_list(verbose: bool) -> Result<()> {
             }
         }
         println!();
+    }
+
+    Ok(())
+}
+
+fn cmd_save(output: Option<String>) -> Result<()> {
+    // 1. Get current directory and find project
+    let current_dir = std::env::current_dir()?;
+    let canonical_dir = current_dir.canonicalize().unwrap_or(current_dir);
+
+    // 2. Load state and find project
+    let state = GlobalState::load()?;
+    let (_, entry) = state
+        .find_project(&canonical_dir)
+        .ok_or(ClaudepodError::ContainerNotCreated)?;
+
+    let entry = entry.clone();
+
+    // 3. Load profile to get runtime (use default if profile was deleted)
+    let profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
+    let runtime = &profile.docker.container_runtime;
+
+    // 4. Check container exists
+    if !DockerClient::container_exists(&entry.container_name, runtime) {
+        return Err(ClaudepodError::Docker(format!(
+            "Container '{}' does not exist. Run 'claudepod create' first.",
+            entry.container_name
+        )));
+    }
+
+    // 5. Determine output path
+    let output_path = match output {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(format!("{}.tar", entry.container_name)),
+    };
+
+    // 6. Export container
+    println!(
+        "Exporting container '{}' to '{}'...",
+        entry.container_name,
+        output_path.display()
+    );
+    DockerClient::export_container(&entry.container_name, &output_path, runtime)?;
+
+    // 7. Show file size
+    if let Ok(metadata) = fs::metadata(&output_path) {
+        let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        println!("Export complete: {:.1} MB", size_mb);
+    } else {
+        println!("Export complete.");
     }
 
     Ok(())

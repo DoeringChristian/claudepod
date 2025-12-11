@@ -377,6 +377,30 @@ impl DockerClient {
         Ok(())
     }
 
+    /// Export container filesystem to a tar file
+    pub fn export_container(container_name: &str, output_path: &Path, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args([
+                "export",
+                container_name,
+                "-o",
+                &output_path.to_string_lossy(),
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to export container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to export container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Get the image ID that a container is using
     #[allow(dead_code)]
     pub fn get_container_image(container_name: &str, runtime: &str) -> Result<String> {
