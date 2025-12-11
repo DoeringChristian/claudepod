@@ -1,10 +1,8 @@
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::error::{ClaudepodError, Result};
 use crate::profile::Profile;
-use crate::state::ProjectEntry;
 
 pub struct DockerClient;
 
@@ -85,14 +83,14 @@ impl DockerClient {
     /// Run a command in a container for a project
     pub fn run(
         profile: &Profile,
-        entry: &ProjectEntry,
+        container_name: &str,
+        image_tag: &str,
         command_name: &str,
         args: &[String],
         project_dir: &Path,
         working_dir: &Path,
     ) -> Result<()> {
         let runtime = &profile.docker.container_runtime;
-        let container_name = &entry.container_name;
 
         // Check if container exists
         let container_exists = Self::container_exists(container_name, runtime);
@@ -106,7 +104,7 @@ impl DockerClient {
         } else {
             // Create new container
             println!("Creating container: {}", container_name);
-            Self::create_container(profile, &entry.image_tag, project_dir, container_name)?;
+            Self::create_container(profile, image_tag, project_dir, container_name)?;
             println!("Starting container...");
             Self::start_container(container_name, runtime)?;
         }
@@ -286,14 +284,6 @@ impl DockerClient {
         }
     }
 
-    /// Generate a unique container name for a project
-    pub fn container_name(project_dir: &Path) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(project_dir.to_string_lossy().as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        format!("claudepod-{}", &hash[..12])
-    }
-
     /// Check if a container exists (running or stopped)
     pub fn container_exists(container_name: &str, runtime: &str) -> bool {
         Command::new(runtime)
@@ -431,24 +421,5 @@ mod tests {
         // Just verify they return something reasonable
         assert!(uid > 0 || cfg!(not(unix)));
         assert!(gid > 0 || cfg!(not(unix)));
-    }
-
-    #[test]
-    fn test_container_name() {
-        let path1 = Path::new("/home/user/project1");
-        let path2 = Path::new("/home/user/project2");
-
-        let name1 = DockerClient::container_name(path1);
-        let name2 = DockerClient::container_name(path2);
-
-        // Names should be different for different paths
-        assert_ne!(name1, name2);
-
-        // Names should be consistent
-        assert_eq!(name1, DockerClient::container_name(path1));
-
-        // Names should have the expected format
-        assert!(name1.starts_with("claudepod-"));
-        assert_eq!(name1.len(), "claudepod-".len() + 12);
     }
 }

@@ -1,9 +1,9 @@
 mod docker;
 mod error;
 mod generator;
+mod marker;
 mod paths;
 mod profile;
-mod state;
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use docker::DockerClient;
 use error::{ClaudepodError, Result};
 use generator::Generator;
+use marker::{ContainerInfo, MarkerFile};
 use profile::Profile;
-use state::{GlobalState, ProjectEntry};
 
 #[derive(Parser)]
 #[command(name = "claudepod")]
@@ -23,6 +23,10 @@ use state::{GlobalState, ProjectEntry};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Container name to use (default: "main")
+    #[arg(short, long, global = true)]
+    container: Option<String>,
 
     /// Arguments to pass to the default command (when no subcommand specified)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -52,15 +56,15 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Remove the container for current project
-    Reset,
-
-    /// List all tracked projects and their containers
-    List {
-        /// Show detailed information
-        #[arg(short, long)]
-        verbose: bool,
+    /// Remove container(s) for current project
+    Reset {
+        /// Remove all containers for this project
+        #[arg(long)]
+        all: bool,
     },
+
+    /// List containers in current project
+    List,
 
     /// Export the container filesystem to a tar file
     Save {
@@ -82,51 +86,65 @@ fn run() -> Result<()> {
     // Ensure directories exist
     paths::ensure_dirs()?;
 
+    // Container name from -c flag (default: "main")
+    let container_name = cli.container.as_deref();
+
     match cli.command {
-        Some(Commands::Create { profile, force }) => cmd_create(&profile, force),
-        Some(Commands::Reset) => cmd_reset(),
-        Some(Commands::List { verbose }) => cmd_list(verbose),
-        Some(Commands::Save { output }) => cmd_save(output),
+        Some(Commands::Create { profile, force }) => cmd_create(&profile, container_name, force),
+        Some(Commands::Reset { all }) => cmd_reset(container_name, all),
+        Some(Commands::List) => cmd_list(),
+        Some(Commands::Save { output }) => cmd_save(container_name, output),
         Some(Commands::Run { command, args }) => {
             let cmd_name = command.unwrap_or_else(|| "claude".to_string());
-            cmd_run(&cmd_name, args)
+            cmd_run(container_name, &cmd_name, args)
         }
         None => {
             // Default behavior: run default command with all args
-            // Check if first arg is a known command name
-            cmd_run_with_args(cli.args)
+            cmd_run_with_args(container_name, cli.args)
         }
     }
 }
 
-fn cmd_create(profile_name: &str, force: bool) -> Result<()> {
-    // 1. Get current directory (canonicalized)
-    let project_dir = std::env::current_dir()?.canonicalize()?;
+fn cmd_create(profile_name: &str, container_name: Option<&str>, force: bool) -> Result<()> {
+    let container_name = container_name.unwrap_or("main");
 
-    // 2. Load global state
-    let mut state = GlobalState::load()?;
+    // 1. Get current directory
+    let current_dir = std::env::current_dir()?;
 
-    // 3. Check if project already tracked
-    if let Some((existing_path, entry)) = state.find_project(&project_dir) {
-        if existing_path == project_dir {
-            if !force {
-                println!("Project already has a container: {}", entry.container_name);
-                println!("Profile: {}", entry.profile_name);
-                println!("Created: {}", entry.created_at.format("%Y-%m-%d %H:%M:%S"));
-                println!("\nUse --force to recreate.");
-                return Ok(());
-            }
-
-            // Remove existing container
-            println!("Removing existing container: {}", entry.container_name);
-            let old_profile =
-                Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
-            let _ = DockerClient::remove_container(
-                &entry.container_name,
-                &old_profile.docker.container_runtime,
-            );
-            state.remove_project(&project_dir);
+    // 2. Try to find existing marker file (search upward), or create new one
+    let (mut marker, marker_path) = match MarkerFile::load() {
+        Ok((m, p)) => (m, p),
+        Err(_) => {
+            // No marker file found, create new one in current directory
+            (MarkerFile::new(), current_dir.join(".claudepod"))
         }
+    };
+
+    // Get project directory from marker path
+    let project_dir = MarkerFile::project_dir(&marker_path);
+
+    // 3. Check if container already exists
+    if let Some(existing) = marker.containers.get(container_name) {
+        if !force {
+            println!(
+                "Container '{}' already exists for this project.",
+                container_name
+            );
+            println!("Profile: {}", existing.profile);
+            println!(
+                "Created: {}",
+                existing.created_at.format("%Y-%m-%d %H:%M:%S")
+            );
+            println!("\nUse --force to recreate.");
+            return Ok(());
+        }
+
+        // Remove existing container
+        let docker_name = MarkerFile::container_name(&existing.uuid);
+        println!("Removing existing container: {}", docker_name);
+        let old_profile = Profile::load(&existing.profile).unwrap_or_else(|_| Profile::default());
+        let _ = DockerClient::remove_container(&docker_name, &old_profile.docker.container_runtime);
+        marker.remove_container(container_name);
     }
 
     // 4. Load profile (ensure default exists first)
@@ -161,71 +179,74 @@ fn cmd_create(profile_name: &str, force: bool) -> Result<()> {
 
     // 7. Build image (if not exists or force)
     let runtime = &profile.docker.container_runtime;
-    let image_id = if !DockerClient::image_exists(&image_tag, runtime) || force {
+    if !DockerClient::image_exists(&image_tag, runtime) || force {
         println!("Building image: {}", image_tag);
-        DockerClient::build(&build_dir, &image_tag, runtime)?
+        DockerClient::build(&build_dir, &image_tag, runtime)?;
     } else {
         println!("Reusing existing image: {}", image_tag);
-        DockerClient::get_image_id(&image_tag, runtime)?
-    };
+    }
 
-    // 8. Create container
-    let container_name = DockerClient::container_name(&project_dir);
-    println!("Creating container: {}", container_name);
-    DockerClient::create_container(&profile, &image_tag, &project_dir, &container_name)?;
+    // 8. Generate UUID and create container
+    let uuid = MarkerFile::generate_uuid();
+    let docker_name = MarkerFile::container_name(&uuid);
+    println!("Creating container: {} ({})", container_name, docker_name);
+    DockerClient::create_container(&profile, &image_tag, &project_dir, &docker_name)?;
 
-    // 9. Update state
-    let entry = ProjectEntry {
-        profile_name: profile_name.to_string(),
-        container_name: container_name.clone(),
-        image_tag,
-        image_id: Some(image_id),
-        config_hash,
+    // 9. Update marker file
+    let info = ContainerInfo {
+        uuid,
+        profile: profile_name.to_string(),
         created_at: Utc::now(),
-        last_used: None,
     };
-    state.set_project(project_dir, entry);
-    state.save()?;
+    marker.add_container(container_name, info);
 
-    println!("\nContainer created successfully!");
+    // Set as default if it's the first container or if it's named "main"
+    if marker.containers.len() == 1 || container_name == "main" {
+        marker.default = container_name.to_string();
+    }
+
+    marker.save(&marker_path)?;
+
+    println!("\nContainer '{}' created successfully!", container_name);
     println!("Run 'claudepod' to start the default command.");
 
     Ok(())
 }
 
-fn cmd_run(command_name: &str, args: Vec<String>) -> Result<()> {
-    // 1. Get current directory
-    let current_dir = std::env::current_dir()?;
-    let canonical_dir = current_dir
-        .canonicalize()
-        .unwrap_or_else(|_| current_dir.clone());
+fn cmd_run(container_name: Option<&str>, command_name: &str, args: Vec<String>) -> Result<()> {
+    // 1. Find marker file (search upward)
+    let (marker, marker_path) = MarkerFile::load()?;
+    let project_dir = MarkerFile::project_dir(&marker_path);
 
-    // 2. Load state and find project (search upward)
-    let mut state = GlobalState::load()?;
-    let (project_dir, entry) = state
-        .find_project(&canonical_dir)
-        .ok_or(ClaudepodError::ContainerNotCreated)?;
+    // 2. Get container info
+    let (name, info) = marker.get_container(container_name)?;
 
-    let project_dir = project_dir.clone();
-    let mut entry = entry.clone();
-
-    // 3. Load profile for this project
-    let profile = Profile::load(&entry.profile_name).map_err(|_| {
+    // 3. Load profile for this container
+    let profile = Profile::load(&info.profile).map_err(|_| {
         ClaudepodError::ProfileNotFound(format!(
             "Profile '{}' not found. The profile used to create this container may have been deleted.",
-            entry.profile_name
+            info.profile
         ))
     })?;
 
-    // 4. Update last_used timestamp
-    entry.last_used = Some(Utc::now());
-    state.set_project(project_dir.clone(), entry.clone());
-    state.save()?;
+    // 4. Compute image tag from profile
+    let config_hash = profile.compute_hash()?;
+    let short_hash = &config_hash[..12];
+    let image_tag = format!("claudepod:{}", short_hash);
 
-    // 5. Run command in container
+    // 5. Get docker container name
+    let docker_name = MarkerFile::container_name(&info.uuid);
+
+    // 6. Get current working directory (may be subdirectory of project)
+    let current_dir = std::env::current_dir()?;
+
+    println!("Using container '{}' ({})", name, docker_name);
+
+    // 7. Run command in container
     DockerClient::run(
         &profile,
-        &entry,
+        &docker_name,
+        &image_tag,
         command_name,
         &args,
         &project_dir,
@@ -233,153 +254,185 @@ fn cmd_run(command_name: &str, args: Vec<String>) -> Result<()> {
     )
 }
 
-fn cmd_run_with_args(args: Vec<String>) -> Result<()> {
+fn cmd_run_with_args(container_name: Option<&str>, args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        return cmd_run("claude", vec![]);
+        return cmd_run(container_name, "claude", vec![]);
     }
 
     // Check if first arg is a known command name
-    let current_dir = std::env::current_dir()?;
-    let state = GlobalState::load()?;
-
-    if let Some((_, entry)) =
-        state.find_project(&current_dir.canonicalize().unwrap_or(current_dir.clone()))
-    {
-        if let Ok(profile) = Profile::load(&entry.profile_name) {
-            if let Some(first_arg) = args.first() {
-                if profile.cmd.commands.contains_key(first_arg.as_str()) {
-                    let command_name = first_arg.clone();
-                    let remaining_args = args[1..].to_vec();
-                    return cmd_run(&command_name, remaining_args);
+    if let Ok((marker, _)) = MarkerFile::load() {
+        if let Ok((_, info)) = marker.get_container(container_name) {
+            if let Ok(profile) = Profile::load(&info.profile) {
+                if let Some(first_arg) = args.first() {
+                    if profile.cmd.commands.contains_key(first_arg.as_str()) {
+                        let command_name = first_arg.clone();
+                        let remaining_args = args[1..].to_vec();
+                        return cmd_run(container_name, &command_name, remaining_args);
+                    }
                 }
             }
         }
     }
 
     // Default command with all args
-    cmd_run("claude", args)
+    cmd_run(container_name, "claude", args)
 }
 
-fn cmd_reset() -> Result<()> {
-    // 1. Get current directory
-    let current_dir = std::env::current_dir()?;
-    let canonical_dir = current_dir.canonicalize().unwrap_or(current_dir);
+fn cmd_reset(container_name: Option<&str>, all: bool) -> Result<()> {
+    // 1. Find marker file
+    let (mut marker, marker_path) = MarkerFile::load()?;
 
-    // 2. Load state and find project
-    let mut state = GlobalState::load()?;
-    let (project_dir, entry) =
-        state
-            .find_project(&canonical_dir)
-            .ok_or(ClaudepodError::ProjectNotFound(
-                "No container found for this project or any parent directory.".to_string(),
-            ))?;
+    if all {
+        // Remove all containers
+        let containers: Vec<_> = marker
+            .containers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-    let project_dir = project_dir.clone();
-    let entry = entry.clone();
+        if containers.is_empty() {
+            println!("No containers found for this project.");
+            return Ok(());
+        }
 
-    // 3. Load profile to get runtime (use default if profile was deleted)
-    let profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
-    let runtime = &profile.docker.container_runtime;
+        for (name, info) in containers {
+            let docker_name = MarkerFile::container_name(&info.uuid);
+            let profile = Profile::load(&info.profile).unwrap_or_else(|_| Profile::default());
+            let runtime = &profile.docker.container_runtime;
 
-    // 4. Remove container if exists
-    if DockerClient::container_exists(&entry.container_name, runtime) {
-        println!("Removing container: {}", entry.container_name);
-        DockerClient::remove_container(&entry.container_name, runtime)?;
-        println!("Container removed.");
+            if DockerClient::container_exists(&docker_name, runtime) {
+                println!("Removing container '{}' ({})...", name, docker_name);
+                DockerClient::remove_container(&docker_name, runtime)?;
+            }
+            marker.remove_container(&name);
+        }
+
+        // Delete the marker file
+        fs::remove_file(&marker_path)?;
+        println!("\nAll containers removed. Project untracked.");
     } else {
-        println!(
-            "Container '{}' does not exist (may have been removed manually).",
-            entry.container_name
-        );
+        // Remove single container
+        let (name, info) = marker.get_container(container_name)?;
+        let name = name.clone();
+        let info = info.clone();
+
+        let docker_name = MarkerFile::container_name(&info.uuid);
+        let profile = Profile::load(&info.profile).unwrap_or_else(|_| Profile::default());
+        let runtime = &profile.docker.container_runtime;
+
+        if DockerClient::container_exists(&docker_name, runtime) {
+            println!("Removing container '{}' ({})...", name, docker_name);
+            DockerClient::remove_container(&docker_name, runtime)?;
+            println!("Container removed.");
+        } else {
+            println!(
+                "Container '{}' ({}) does not exist (may have been removed manually).",
+                name, docker_name
+            );
+        }
+
+        marker.remove_container(&name);
+
+        if marker.containers.is_empty() {
+            // No containers left, delete marker file
+            fs::remove_file(&marker_path)?;
+            println!("\nNo containers remaining. Project untracked.");
+        } else {
+            // Update default if we removed it
+            if marker.default == name {
+                marker.default = marker.containers.keys().next().unwrap().clone();
+                println!("Default container changed to '{}'.", marker.default);
+            }
+            marker.save(&marker_path)?;
+        }
     }
 
-    // 5. Remove from state
-    state.remove_project(&project_dir);
-    state.save()?;
-
-    println!("\nProject untracked. Run 'claudepod create <profile>' to create a new container.");
+    println!("\nRun 'claudepod create <profile>' to create a new container.");
 
     Ok(())
 }
 
-fn cmd_list(verbose: bool) -> Result<()> {
-    let state = GlobalState::load()?;
-    let projects = state.list_projects();
+fn cmd_list() -> Result<()> {
+    // Try to load marker file
+    match MarkerFile::load() {
+        Ok((marker, marker_path)) => {
+            let project_dir = MarkerFile::project_dir(&marker_path);
 
-    if projects.is_empty() {
-        println!("No tracked projects.");
-        println!("\nRun 'claudepod create <profile>' in a project directory to get started.");
-        println!("Available profiles:");
-        Profile::ensure_default()?;
-        for name in Profile::list_available()? {
-            println!("  - {}", name);
-        }
-        return Ok(());
-    }
+            println!("Project: {}\n", project_dir.display());
+            println!("Containers:");
 
-    println!("Tracked projects:\n");
+            let containers = marker.list_containers();
+            if containers.is_empty() {
+                println!("  (none)");
+            } else {
+                for name in containers {
+                    let info = marker.containers.get(name).unwrap();
+                    let docker_name = MarkerFile::container_name(&info.uuid);
+                    let is_default = name == &marker.default;
 
-    for (path, entry) in projects {
-        println!("  {}", path.display());
-        println!("    Container: {}", entry.container_name);
-        println!("    Profile:   {}", entry.profile_name);
-
-        if verbose {
-            println!("    Image:     {}", entry.image_tag);
-            println!(
-                "    Created:   {}",
-                entry.created_at.format("%Y-%m-%d %H:%M:%S")
-            );
-            if let Some(last_used) = &entry.last_used {
-                println!("    Last used: {}", last_used.format("%Y-%m-%d %H:%M:%S"));
+                    println!("  {} {}", name, if is_default { "(default)" } else { "" });
+                    println!("    Docker name: {}", docker_name);
+                    println!("    Profile:     {}", info.profile);
+                    println!(
+                        "    Created:     {}",
+                        info.created_at.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    println!();
+                }
             }
         }
-        println!();
+        Err(_) => {
+            println!("No .claudepod file found in this directory or any parent.");
+            println!("\nRun 'claudepod create <profile>' to create a container for this project.");
+            println!("\nAvailable profiles:");
+            Profile::ensure_default()?;
+            for name in Profile::list_available()? {
+                println!("  - {}", name);
+            }
+        }
     }
 
     Ok(())
 }
 
-fn cmd_save(output: Option<String>) -> Result<()> {
-    // 1. Get current directory and find project
-    let current_dir = std::env::current_dir()?;
-    let canonical_dir = current_dir.canonicalize().unwrap_or(current_dir);
+fn cmd_save(container_name: Option<&str>, output: Option<String>) -> Result<()> {
+    // 1. Find marker file
+    let (marker, _) = MarkerFile::load()?;
 
-    // 2. Load state and find project
-    let state = GlobalState::load()?;
-    let (_, entry) = state
-        .find_project(&canonical_dir)
-        .ok_or(ClaudepodError::ContainerNotCreated)?;
+    // 2. Get container info
+    let (name, info) = marker.get_container(container_name)?;
 
-    let entry = entry.clone();
-
-    // 3. Load profile to get runtime (use default if profile was deleted)
-    let profile = Profile::load(&entry.profile_name).unwrap_or_else(|_| Profile::default());
+    // 3. Load profile to get runtime
+    let profile = Profile::load(&info.profile).unwrap_or_else(|_| Profile::default());
     let runtime = &profile.docker.container_runtime;
 
-    // 4. Check container exists
-    if !DockerClient::container_exists(&entry.container_name, runtime) {
+    // 4. Get docker container name
+    let docker_name = MarkerFile::container_name(&info.uuid);
+
+    // 5. Check container exists
+    if !DockerClient::container_exists(&docker_name, runtime) {
         return Err(ClaudepodError::Docker(format!(
-            "Container '{}' does not exist. Run 'claudepod create' first.",
-            entry.container_name
+            "Container '{}' ({}) does not exist. Run 'claudepod create' first.",
+            name, docker_name
         )));
     }
 
-    // 5. Determine output path
+    // 6. Determine output path
     let output_path = match output {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(format!("{}.tar", entry.container_name)),
+        None => PathBuf::from(format!("{}.tar", docker_name)),
     };
 
-    // 6. Export container
+    // 7. Export container
     println!(
-        "Exporting container '{}' to '{}'...",
-        entry.container_name,
+        "Exporting container '{}' ({}) to '{}'...",
+        name,
+        docker_name,
         output_path.display()
     );
-    DockerClient::export_container(&entry.container_name, &output_path, runtime)?;
+    DockerClient::export_container(&docker_name, &output_path, runtime)?;
 
-    // 7. Show file size
+    // 8. Show file size
     if let Ok(metadata) = fs::metadata(&output_path) {
         let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
         println!("Export complete: {:.1} MB", size_mb);

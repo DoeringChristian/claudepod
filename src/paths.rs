@@ -22,11 +22,6 @@ pub fn data_dir() -> PathBuf {
         .join("claudepod")
 }
 
-/// Get the state file path (~/.local/share/claudepod/state.json)
-pub fn state_file() -> PathBuf {
-    data_dir().join("state.json")
-}
-
 /// Get the build directory (~/.local/share/claudepod/build)
 pub fn build_dir() -> PathBuf {
     data_dir().join("build")
@@ -50,7 +45,6 @@ mod tests {
         assert!(config_dir().ends_with("claudepod"));
         assert!(profiles_dir().ends_with("profiles"));
         assert!(data_dir().ends_with("claudepod"));
-        assert!(state_file().ends_with("state.json"));
         assert!(build_dir().ends_with("build"));
     }
 
