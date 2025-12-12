@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::error::{ClaudepodError, Result};
-use crate::profile::Profile;
+use crate::profile::{CommandsConfig, DockerConfig};
 
 pub struct DockerClient;
 
@@ -82,7 +82,8 @@ impl DockerClient {
 
     /// Run a command in a container for a project
     pub fn run(
-        profile: &Profile,
+        docker: &DockerConfig,
+        commands: &CommandsConfig,
         container_name: &str,
         image_tag: &str,
         command_name: &str,
@@ -90,7 +91,7 @@ impl DockerClient {
         project_dir: &Path,
         working_dir: &Path,
     ) -> Result<()> {
-        let runtime = &profile.docker.container_runtime;
+        let runtime = &docker.container_runtime;
 
         // Check if container exists
         let container_exists = Self::container_exists(container_name, runtime);
@@ -104,14 +105,15 @@ impl DockerClient {
         } else {
             // Create new container
             println!("Creating container: {}", container_name);
-            Self::create_container(profile, image_tag, project_dir, container_name)?;
+            Self::create_container(docker, image_tag, project_dir, container_name)?;
             println!("Starting container...");
             Self::start_container(container_name, runtime)?;
         }
 
         // Execute command in the running container
         Self::exec_in_container(
-            profile,
+            docker,
+            commands,
             container_name,
             command_name,
             args,
@@ -122,17 +124,17 @@ impl DockerClient {
 
     /// Create a persistent container
     pub fn create_container(
-        profile: &Profile,
+        docker: &DockerConfig,
         image_tag: &str,
         project_dir: &Path,
         container_name: &str,
     ) -> Result<()> {
-        let runtime = &profile.docker.container_runtime;
+        let runtime = &docker.container_runtime;
         let mut cmd = Command::new(runtime);
         cmd.args(["create", "--name", container_name]);
 
         // Interactive terminal
-        if profile.docker.interactive {
+        if docker.interactive {
             cmd.arg("-it");
         }
 
@@ -150,8 +152,8 @@ impl DockerClient {
         cmd.arg("-v")
             .arg(format!("{}:{}", project_dir_str, project_dir_str));
 
-        // Mount additional volumes from profile
-        for volume in &profile.docker.volumes {
+        // Mount additional volumes from config
+        for volume in &docker.volumes {
             let host_path = shellexpand::full(&volume.host)
                 .map_err(|e| ClaudepodError::Docker(format!("Failed to expand path: {}", e)))?;
 
@@ -166,7 +168,7 @@ impl DockerClient {
         }
 
         // Tmpfs mounts
-        for tmpfs in &profile.docker.tmpfs {
+        for tmpfs in &docker.tmpfs {
             let mut tmpfs_arg = format!("{}:size={}", tmpfs.path, tmpfs.size);
             if tmpfs.readonly {
                 tmpfs_arg.push_str(",ro");
@@ -175,12 +177,12 @@ impl DockerClient {
         }
 
         // GPU support
-        if profile.docker.enable_gpu {
-            cmd.arg("--gpus").arg(&profile.docker.gpu_driver);
+        if docker.enable_gpu {
+            cmd.arg("--gpus").arg(&docker.gpu_driver);
         }
 
         // Extra Docker arguments
-        for arg in &profile.docker.extra_args {
+        for arg in &docker.extra_args {
             cmd.arg(arg);
         }
 
@@ -207,7 +209,8 @@ impl DockerClient {
 
     /// Execute a command in a running container
     fn exec_in_container(
-        profile: &Profile,
+        docker: &DockerConfig,
+        commands: &CommandsConfig,
         container_name: &str,
         command_name: &str,
         args: &[String],
@@ -215,9 +218,9 @@ impl DockerClient {
         working_dir: &Path,
     ) -> Result<()> {
         // Resolve the command
-        let (executable, cmd_config) = profile.cmd.resolve(command_name)?;
+        let (executable, cmd_config) = commands.resolve(command_name)?;
 
-        let runtime = &profile.docker.container_runtime;
+        let runtime = &docker.container_runtime;
         let mut cmd = Command::new(runtime);
         cmd.args(["exec", "-it"]);
 

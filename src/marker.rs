@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{ClaudepodError, Result};
+use crate::profile::{CommandsConfig, DockerConfig};
 
 const MARKER_FILE_NAME: &str = ".claudepod";
 
@@ -26,11 +27,23 @@ pub struct ContainerInfo {
     /// UUID for the container (used in podman/docker container name)
     pub uuid: String,
 
-    /// Profile name used to create the container
+    /// Profile name used to create the container (for reference)
     pub profile: String,
 
     /// When the container was created
     pub created_at: DateTime<Utc>,
+
+    /// The image tag used for this container
+    #[serde(default)]
+    pub image_tag: String,
+
+    /// Frozen docker/runtime configuration (volumes, mounts, etc.)
+    #[serde(default)]
+    pub docker: Option<DockerConfig>,
+
+    /// Frozen command configuration
+    #[serde(default)]
+    pub commands: Option<CommandsConfig>,
 }
 
 impl Default for MarkerFile {
@@ -178,6 +191,9 @@ mod tests {
             uuid: "test-uuid-1234".to_string(),
             profile: "default".to_string(),
             created_at: Utc::now(),
+            image_tag: "claudepod:test".to_string(),
+            docker: None,
+            commands: None,
         };
 
         marker.add_container("main", info.clone());
@@ -208,6 +224,9 @@ mod tests {
             uuid: "test-uuid".to_string(),
             profile: "default".to_string(),
             created_at: Utc::now(),
+            image_tag: "claudepod:test".to_string(),
+            docker: None,
+            commands: None,
         };
 
         marker.add_container("test", info);
@@ -247,6 +266,9 @@ mod tests {
                 uuid: "test-uuid".to_string(),
                 profile: "default".to_string(),
                 created_at: Utc::now(),
+                image_tag: "claudepod:test".to_string(),
+                docker: None,
+                commands: None,
             },
         );
 

@@ -191,13 +191,16 @@ fn cmd_init(profile_name: &str, container_name: Option<&str>, force: bool) -> Re
     let uuid = MarkerFile::generate_uuid();
     let docker_name = MarkerFile::container_name(&uuid);
     println!("Creating container: {} ({})", container_name, docker_name);
-    DockerClient::create_container(&profile, &image_tag, &project_dir, &docker_name)?;
+    DockerClient::create_container(&profile.docker, &image_tag, &project_dir, &docker_name)?;
 
-    // 9. Update marker file
+    // 9. Update marker file with frozen configuration
     let info = ContainerInfo {
         uuid,
         profile: profile_name.to_string(),
         created_at: Utc::now(),
+        image_tag: image_tag.clone(),
+        docker: Some(profile.docker.clone()),
+        commands: Some(profile.cmd.clone()),
     };
     marker.add_container(container_name, info);
 
@@ -245,30 +248,46 @@ fn cmd_run(container_name: Option<&str>, command_name: &str, args: Vec<String>) 
     // 2. Get container info
     let (name, info) = marker.get_container(container_name)?;
 
-    // 3. Load profile for this container
-    let profile = Profile::load(&info.profile).map_err(|_| {
-        ClaudepodError::ProfileNotFound(format!(
-            "Profile '{}' not found. The profile used to create this container may have been deleted.",
-            info.profile
-        ))
-    })?;
+    // 3. Get docker config and commands (use stored config or fallback to profile)
+    let (docker_config, commands_config, image_tag) = match (&info.docker, &info.commands) {
+        (Some(docker), Some(commands)) => {
+            // Use stored configuration (frozen at creation time)
+            let tag = if info.image_tag.is_empty() {
+                // Backwards compatibility: compute from profile if not stored
+                let profile = Profile::load(&info.profile)?;
+                let hash = profile.compute_hash()?;
+                format!("claudepod:{}", &hash[..12])
+            } else {
+                info.image_tag.clone()
+            };
+            (docker.clone(), commands.clone(), tag)
+        }
+        _ => {
+            // Backwards compatibility: load from profile
+            let profile = Profile::load(&info.profile).map_err(|_| {
+                ClaudepodError::ProfileNotFound(format!(
+                    "Profile '{}' not found. The profile used to create this container may have been deleted.",
+                    info.profile
+                ))
+            })?;
+            let hash = profile.compute_hash()?;
+            let tag = format!("claudepod:{}", &hash[..12]);
+            (profile.docker.clone(), profile.cmd.clone(), tag)
+        }
+    };
 
-    // 4. Compute image tag from profile
-    let config_hash = profile.compute_hash()?;
-    let short_hash = &config_hash[..12];
-    let image_tag = format!("claudepod:{}", short_hash);
-
-    // 5. Get docker container name
+    // 4. Get docker container name
     let docker_name = MarkerFile::container_name(&info.uuid);
 
-    // 6. Get current working directory (may be subdirectory of project)
+    // 5. Get current working directory (may be subdirectory of project)
     let current_dir = std::env::current_dir()?;
 
     println!("Using container '{}' ({})", name, docker_name);
 
-    // 7. Run command in container
+    // 6. Run command in container
     DockerClient::run(
-        &profile,
+        &docker_config,
+        &commands_config,
         &docker_name,
         &image_tag,
         command_name,
