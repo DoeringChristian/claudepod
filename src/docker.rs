@@ -394,6 +394,25 @@ impl DockerClient {
         Ok(())
     }
 
+    /// Import a tar file as a container image
+    pub fn import_image(tarfile: &Path, image_tag: &str, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args(["import", &tarfile.to_string_lossy(), image_tag])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to import image: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to import image: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Get the image ID that a container is using
     #[allow(dead_code)]
     pub fn get_container_image(container_name: &str, runtime: &str) -> Result<String> {

@@ -72,6 +72,16 @@ enum Commands {
         /// Output file path (default: <container_name>.tar in current directory)
         output: Option<String>,
     },
+
+    /// Load a container from a saved tar file
+    Load {
+        /// Path to the tar file to import
+        tarfile: String,
+
+        /// Profile to use if no config in tar file
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
 }
 
 fn main() {
@@ -95,6 +105,7 @@ fn run() -> Result<()> {
         Some(Commands::Reset { all }) => cmd_reset(container_name, all),
         Some(Commands::List) => cmd_list(),
         Some(Commands::Save { output }) => cmd_save(container_name, output),
+        Some(Commands::Load { tarfile, profile }) => cmd_load(&tarfile, &profile, container_name),
         Some(Commands::Run { command, args }) => {
             let cmd_name = command.unwrap_or_else(|| "claude".to_string());
             cmd_run(container_name, &cmd_name, args)
@@ -439,21 +450,30 @@ fn cmd_list() -> Result<()> {
 }
 
 fn cmd_save(container_name: Option<&str>, output: Option<String>) -> Result<()> {
+    use std::process::Command;
+
     // 1. Find marker file, prompt to init if not found
     let (marker, _) = ensure_marker_exists()?;
 
     // 2. Get container info
     let (name, info) = marker.get_container(container_name)?;
 
-    // 3. Load profile to get runtime
-    let profile = Profile::load(&info.profile).unwrap_or_else(|_| Profile::default());
-    let runtime = &profile.docker.container_runtime;
+    // 3. Get runtime from stored config or fallback to profile
+    let runtime = info
+        .docker
+        .as_ref()
+        .map(|d| d.container_runtime.clone())
+        .unwrap_or_else(|| {
+            Profile::load(&info.profile)
+                .map(|p| p.docker.container_runtime.clone())
+                .unwrap_or_else(|_| "podman".to_string())
+        });
 
     // 4. Get docker container name
     let docker_name = MarkerFile::container_name(&info.uuid);
 
     // 5. Check container exists
-    if !DockerClient::container_exists(&docker_name, runtime) {
+    if !DockerClient::container_exists(&docker_name, &runtime) {
         return Err(ClaudepodError::Docker(format!(
             "Container '{}' ({}) does not exist. Run 'claudepod init' first.",
             name, docker_name
@@ -473,15 +493,169 @@ fn cmd_save(container_name: Option<&str>, output: Option<String>) -> Result<()> 
         docker_name,
         output_path.display()
     );
-    DockerClient::export_container(&docker_name, &output_path, runtime)?;
+    DockerClient::export_container(&docker_name, &output_path, &runtime)?;
 
-    // 8. Show file size
+    // 8. Append config to tar file
+    let config_toml = toml::to_string_pretty(info)?;
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(".claudepod-config.toml");
+    fs::write(&config_path, &config_toml)?;
+
+    // Use tar to append the config file
+    let status = Command::new("tar")
+        .args([
+            "--append",
+            "-f",
+            &output_path.to_string_lossy(),
+            "-C",
+            &temp_dir.to_string_lossy(),
+            ".claudepod-config.toml",
+        ])
+        .status()
+        .map_err(|e| ClaudepodError::Other(format!("Failed to append config to tar: {}", e)))?;
+
+    // Clean up temp file
+    let _ = fs::remove_file(&config_path);
+
+    if !status.success() {
+        return Err(ClaudepodError::Other(
+            "Failed to append config to tar archive".to_string(),
+        ));
+    }
+
+    // 9. Show file size
     if let Ok(metadata) = fs::metadata(&output_path) {
         let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-        println!("Export complete: {:.1} MB", size_mb);
+        println!("Export complete: {:.1} MB (config included)", size_mb);
     } else {
         println!("Export complete.");
     }
+
+    Ok(())
+}
+
+fn cmd_load(
+    tarfile: &str,
+    profile_name: &str,
+    container_name: Option<&str>,
+) -> Result<()> {
+    use std::process::Command;
+
+    let container_name = container_name.unwrap_or("main");
+    let tarfile_path = PathBuf::from(tarfile);
+
+    // 1. Verify tar file exists
+    if !tarfile_path.exists() {
+        return Err(ClaudepodError::FileNotFound(format!(
+            "Tar file not found: {}",
+            tarfile
+        )));
+    }
+
+    // 2. Try to extract config from tar
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(".claudepod-config.toml");
+
+    // Clean up any existing temp config
+    let _ = fs::remove_file(&config_path);
+
+    let extract_result = Command::new("tar")
+        .args([
+            "-xf",
+            tarfile,
+            "-C",
+            &temp_dir.to_string_lossy(),
+            ".claudepod-config.toml",
+        ])
+        .output();
+
+    let saved_config: Option<ContainerInfo> = if let Ok(output) = extract_result {
+        if output.status.success() && config_path.exists() {
+            let content = fs::read_to_string(&config_path)?;
+            let _ = fs::remove_file(&config_path);
+            toml::from_str(&content).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 3. Get current directory for project
+    let current_dir = std::env::current_dir()?;
+    let marker_path = current_dir.join(".claudepod");
+
+    // 4. Load or create marker file
+    let mut marker = if marker_path.exists() {
+        MarkerFile::load_from(&marker_path)?
+    } else {
+        MarkerFile::new()
+    };
+
+    // 5. Determine config to use
+    let (docker_config, commands_config, image_tag) = if let Some(ref config) = saved_config {
+        println!("Found saved configuration in tar file");
+        let docker = config.docker.clone().unwrap_or_else(|| {
+            Profile::load(profile_name)
+                .map(|p| p.docker.clone())
+                .unwrap_or_default()
+        });
+        let commands = config.commands.clone().unwrap_or_else(|| {
+            Profile::load(profile_name)
+                .map(|p| p.cmd.clone())
+                .unwrap_or_default()
+        });
+        let tag = if config.image_tag.is_empty() {
+            format!("claudepod:imported-{}", &MarkerFile::generate_uuid()[..8])
+        } else {
+            config.image_tag.clone()
+        };
+        (docker, commands, tag)
+    } else {
+        println!("No saved configuration found, using profile '{}'", profile_name);
+        Profile::ensure_default()?;
+        let profile = Profile::load(profile_name)?;
+        let tag = format!("claudepod:imported-{}", &MarkerFile::generate_uuid()[..8]);
+        (profile.docker.clone(), profile.cmd.clone(), tag)
+    };
+
+    let runtime = &docker_config.container_runtime;
+
+    // 6. Import tar file as image
+    println!("Importing container image...");
+    DockerClient::import_image(&tarfile_path, &image_tag, runtime)?;
+
+    // 7. Generate UUID and create container
+    let uuid = MarkerFile::generate_uuid();
+    let docker_name = MarkerFile::container_name(&uuid);
+    let project_dir = MarkerFile::project_dir(&marker_path);
+
+    println!("Creating container: {} ({})", container_name, docker_name);
+    DockerClient::create_container(&docker_config, &image_tag, &project_dir, &docker_name)?;
+
+    // 8. Update marker file
+    let info = ContainerInfo {
+        uuid,
+        profile: saved_config
+            .as_ref()
+            .map(|c| c.profile.clone())
+            .unwrap_or_else(|| profile_name.to_string()),
+        created_at: Utc::now(),
+        image_tag,
+        docker: Some(docker_config),
+        commands: Some(commands_config),
+    };
+    marker.add_container(container_name, info);
+
+    // Set as default if it's the first container or if it's named "main"
+    if marker.containers.len() == 1 || container_name == "main" {
+        marker.default = container_name.to_string();
+    }
+
+    marker.save(&marker_path)?;
+
+    println!("\nContainer '{}' loaded successfully!", container_name);
+    println!("Run 'claudepod' to start the default command.");
 
     Ok(())
 }
