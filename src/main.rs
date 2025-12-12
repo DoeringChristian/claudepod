@@ -8,6 +8,7 @@ mod profile;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use docker::DockerClient;
@@ -35,8 +36,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create a container for the current directory using a profile
-    Create {
+    /// Initialize claudepod for the current directory using a profile
+    Init {
         /// Profile name to use (from ~/.config/claudepod/profiles/)
         #[arg(default_value = "default")]
         profile: String,
@@ -90,7 +91,7 @@ fn run() -> Result<()> {
     let container_name = cli.container.as_deref();
 
     match cli.command {
-        Some(Commands::Create { profile, force }) => cmd_create(&profile, container_name, force),
+        Some(Commands::Init { profile, force }) => cmd_init(&profile, container_name, force),
         Some(Commands::Reset { all }) => cmd_reset(container_name, all),
         Some(Commands::List) => cmd_list(),
         Some(Commands::Save { output }) => cmd_save(container_name, output),
@@ -105,7 +106,7 @@ fn run() -> Result<()> {
     }
 }
 
-fn cmd_create(profile_name: &str, container_name: Option<&str>, force: bool) -> Result<()> {
+fn cmd_init(profile_name: &str, container_name: Option<&str>, force: bool) -> Result<()> {
     let container_name = container_name.unwrap_or("main");
 
     // 1. Get current directory
@@ -213,9 +214,32 @@ fn cmd_create(profile_name: &str, container_name: Option<&str>, force: bool) -> 
     Ok(())
 }
 
+/// Ensure a marker file exists, prompting the user to create one if not found
+fn ensure_marker_exists() -> Result<(MarkerFile, PathBuf)> {
+    match MarkerFile::load() {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            println!("No .claudepod file found in this directory or any parent.");
+            print!("Initialize now? [Y/n] ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_lowercase();
+
+            if input.is_empty() || input == "y" || input == "yes" {
+                cmd_init("default", None, false)?;
+                MarkerFile::load()
+            } else {
+                Err(ClaudepodError::Other("Aborted.".to_string()))
+            }
+        }
+    }
+}
+
 fn cmd_run(container_name: Option<&str>, command_name: &str, args: Vec<String>) -> Result<()> {
-    // 1. Find marker file (search upward)
-    let (marker, marker_path) = MarkerFile::load()?;
+    // 1. Find marker file (search upward), prompt to init if not found
+    let (marker, marker_path) = ensure_marker_exists()?;
     let project_dir = MarkerFile::project_dir(&marker_path);
 
     // 2. Get container info
@@ -279,8 +303,8 @@ fn cmd_run_with_args(container_name: Option<&str>, args: Vec<String>) -> Result<
 }
 
 fn cmd_reset(container_name: Option<&str>, all: bool) -> Result<()> {
-    // 1. Find marker file
-    let (mut marker, marker_path) = MarkerFile::load()?;
+    // 1. Find marker file, prompt to init if not found
+    let (mut marker, marker_path) = ensure_marker_exists()?;
 
     if all {
         // Remove all containers
@@ -347,7 +371,7 @@ fn cmd_reset(container_name: Option<&str>, all: bool) -> Result<()> {
         }
     }
 
-    println!("\nRun 'claudepod create <profile>' to create a new container.");
+    println!("\nRun 'claudepod init <profile>' to create a new container.");
 
     Ok(())
 }
@@ -383,7 +407,7 @@ fn cmd_list() -> Result<()> {
         }
         Err(_) => {
             println!("No .claudepod file found in this directory or any parent.");
-            println!("\nRun 'claudepod create <profile>' to create a container for this project.");
+            println!("\nRun 'claudepod init <profile>' to create a container for this project.");
             println!("\nAvailable profiles:");
             Profile::ensure_default()?;
             for name in Profile::list_available()? {
@@ -396,8 +420,8 @@ fn cmd_list() -> Result<()> {
 }
 
 fn cmd_save(container_name: Option<&str>, output: Option<String>) -> Result<()> {
-    // 1. Find marker file
-    let (marker, _) = MarkerFile::load()?;
+    // 1. Find marker file, prompt to init if not found
+    let (marker, _) = ensure_marker_exists()?;
 
     // 2. Get container info
     let (name, info) = marker.get_container(container_name)?;
@@ -412,7 +436,7 @@ fn cmd_save(container_name: Option<&str>, output: Option<String>) -> Result<()> 
     // 5. Check container exists
     if !DockerClient::container_exists(&docker_name, runtime) {
         return Err(ClaudepodError::Docker(format!(
-            "Container '{}' ({}) does not exist. Run 'claudepod create' first.",
+            "Container '{}' ({}) does not exist. Run 'claudepod init' first.",
             name, docker_name
         )));
     }

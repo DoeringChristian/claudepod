@@ -79,7 +79,7 @@ impl MarkerFile {
 
         loop {
             let marker_path = current_dir.join(MARKER_FILE_NAME);
-            if marker_path.exists() {
+            if marker_path.is_file() {
                 return Ok(marker_path);
             }
 
@@ -91,7 +91,7 @@ impl MarkerFile {
         }
 
         Err(ClaudepodError::FileNotFound(format!(
-            "{} not found in current directory or any parent directory. Run 'claudepod create' to create one.",
+            "{} not found in current directory or any parent directory. Run 'claudepod init' to create one.",
             MARKER_FILE_NAME
         )))
     }
