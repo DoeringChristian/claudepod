@@ -33,6 +33,9 @@ pub enum ClaudepodError {
     #[error("Container not found: {0}")]
     ContainerNotFound(String),
 
+    #[error("Project not found: {0}")]
+    ProjectNotFound(String),
+
     #[error("{0}")]
     Other(String),
 }
