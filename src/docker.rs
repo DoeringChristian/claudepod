@@ -178,7 +178,17 @@ impl DockerClient {
 
         // GPU support
         if docker.enable_gpu {
-            cmd.arg("--gpus").arg(&docker.gpu_driver);
+            if docker.container_runtime == "podman" {
+                // Podman uses CDI (Container Device Interface) for GPU access
+                let cdi_device = if docker.gpu_driver == "all" {
+                    "nvidia.com/gpu=all".to_string()
+                } else {
+                    format!("nvidia.com/gpu={}", docker.gpu_driver)
+                };
+                cmd.arg("--device").arg(cdi_device);
+            } else {
+                cmd.arg("--gpus").arg(&docker.gpu_driver);
+            }
         }
 
         // Extra Docker arguments
