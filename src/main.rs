@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use docker::DockerClient;
 use error::{ClaudepodError, Result};
 use generator::Generator;
-use profile::Profile;
+use profile::{Profile, VolumeMount};
 use storage::{
     compute_project_id, container_name, delete_project_data, generate_uuid, load_project_data,
     save_project_data, ContainerInfo, ProjectData, ProjectEntry, ProjectsIndex,
@@ -110,6 +110,34 @@ enum Commands {
 
     /// Show detailed info about current project
     ProjectInfo,
+
+    /// Manage volume mounts for a container
+    Mount {
+        #[command(subcommand)]
+        action: MountAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MountAction {
+    /// Add a volume mount (HOST_PATH or HOST_PATH:CONTAINER_PATH)
+    Add {
+        /// Path spec: HOST_PATH or HOST_PATH:CONTAINER_PATH
+        path: String,
+
+        /// Mount as read-only
+        #[arg(long)]
+        readonly: bool,
+    },
+
+    /// List current volume mounts
+    List,
+
+    /// Remove a volume mount by host or container path
+    Remove {
+        /// Path to remove (matches against host or container path)
+        path: String,
+    },
 }
 
 fn main() {
@@ -138,6 +166,7 @@ fn run() -> Result<()> {
         Some(Commands::Gc { force }) => cmd_gc(force),
         Some(Commands::Unlink { remove_containers }) => cmd_unlink(remove_containers),
         Some(Commands::ProjectInfo) => cmd_project_info(),
+        Some(Commands::Mount { action }) => cmd_mount(container_name, action),
         Some(Commands::Run { command, args }) => {
             let cmd_name = command.unwrap_or_else(|| "claude".to_string());
             cmd_run(container_name, &cmd_name, args)
@@ -1023,4 +1052,134 @@ fn cmd_project_info() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_mount(container_name_arg: Option<&str>, action: MountAction) -> Result<()> {
+    let mut index = ProjectsIndex::load()?;
+    let (project_id, _project_dir, mut data) = ensure_project_exists(&mut index)?;
+    index.save()?;
+
+    match action {
+        MountAction::List => {
+            let (_name, info) = data.get_container(container_name_arg)?;
+            let docker = info.docker.as_ref().ok_or_else(|| {
+                ClaudepodError::Other("No frozen config found for container.".to_string())
+            })?;
+
+            if docker.volumes.is_empty() {
+                println!("No volume mounts configured.");
+            } else {
+                println!("Volume mounts:");
+                for vol in &docker.volumes {
+                    let ro = if vol.readonly { " (read-only)" } else { "" };
+                    println!("  {} -> {}{}", vol.host, vol.container, ro);
+                }
+            }
+            Ok(())
+        }
+        MountAction::Add { path, readonly } => {
+            // Parse path spec: HOST or HOST:CONTAINER
+            let (host, container_path) = if let Some(idx) = path.find(':') {
+                (path[..idx].to_string(), path[idx + 1..].to_string())
+            } else {
+                let expanded = shellexpand::tilde(&path).to_string();
+                (expanded.clone(), expanded)
+            };
+
+            let host = shellexpand::tilde(&host).to_string();
+
+            let new_volume = VolumeMount {
+                host: host.clone(),
+                container: container_path.clone(),
+                readonly,
+            };
+
+            let info = data.get_container_mut(container_name_arg)?;
+            let docker = info.docker.as_mut().ok_or_else(|| {
+                ClaudepodError::Other("No frozen config found for container.".to_string())
+            })?;
+
+            // Check for duplicate
+            if docker.volumes.iter().any(|v| v.host == host) {
+                return Err(ClaudepodError::Other(format!(
+                    "Host path '{}' is already mounted.",
+                    host
+                )));
+            }
+
+            let docker_name = container_name(&info.uuid);
+            let runtime = docker.container_runtime.clone();
+
+            // If container exists, commit its state to preserve filesystem changes
+            if DockerClient::container_exists(&docker_name, &runtime) {
+                println!("Stopping container...");
+                if DockerClient::container_is_running(&docker_name, &runtime) {
+                    DockerClient::stop_container(&docker_name, &runtime)?;
+                }
+
+                let new_image_tag = format!("claudepod:mount-{}", &generate_uuid().replace('-', "")[..12]);
+                println!("Committing container state to {}...", new_image_tag);
+                DockerClient::commit_container(&docker_name, &new_image_tag, &runtime)?;
+
+                println!("Removing old container...");
+                DockerClient::remove_container(&docker_name, &runtime)?;
+
+                info.image_tag = new_image_tag;
+            }
+
+            docker.volumes.push(new_volume);
+            save_project_data(&project_id, &data)?;
+
+            let ro = if readonly { " (read-only)" } else { "" };
+            println!("Added mount: {} -> {}{}", host, container_path, ro);
+            println!("The container will be recreated with the new mount on next run.");
+
+            Ok(())
+        }
+        MountAction::Remove { path } => {
+            let expanded = shellexpand::tilde(&path).to_string();
+
+            let info = data.get_container_mut(container_name_arg)?;
+            let docker = info.docker.as_mut().ok_or_else(|| {
+                ClaudepodError::Other("No frozen config found for container.".to_string())
+            })?;
+
+            let original_len = docker.volumes.len();
+            docker.volumes.retain(|v| v.host != expanded && v.container != expanded);
+
+            if docker.volumes.len() == original_len {
+                return Err(ClaudepodError::Other(format!(
+                    "No mount found matching '{}'.",
+                    path
+                )));
+            }
+
+            let docker_name = container_name(&info.uuid);
+            let runtime = docker.container_runtime.clone();
+
+            // If container exists, commit its state to preserve filesystem changes
+            if DockerClient::container_exists(&docker_name, &runtime) {
+                println!("Stopping container...");
+                if DockerClient::container_is_running(&docker_name, &runtime) {
+                    DockerClient::stop_container(&docker_name, &runtime)?;
+                }
+
+                let new_image_tag = format!("claudepod:mount-{}", &generate_uuid().replace('-', "")[..12]);
+                println!("Committing container state to {}...", new_image_tag);
+                DockerClient::commit_container(&docker_name, &new_image_tag, &runtime)?;
+
+                println!("Removing old container...");
+                DockerClient::remove_container(&docker_name, &runtime)?;
+
+                info.image_tag = new_image_tag;
+            }
+
+            save_project_data(&project_id, &data)?;
+
+            println!("Removed mount for '{}'.", path);
+            println!("The container will be recreated without the mount on next run.");
+
+            Ok(())
+        }
+    }
 }

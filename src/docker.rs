@@ -363,6 +363,40 @@ impl DockerClient {
         Ok(())
     }
 
+    /// Stop a running container
+    pub fn stop_container(container_name: &str, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args(["stop", container_name])
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to stop container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to stop container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Commit a container's filesystem to a new image
+    pub fn commit_container(container_name: &str, image_tag: &str, runtime: &str) -> Result<()> {
+        let output = Command::new(runtime)
+            .args(["commit", container_name, image_tag])
+            .output()
+            .map_err(|e| ClaudepodError::Docker(format!("Failed to commit container: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(ClaudepodError::Docker(format!(
+                "Failed to commit container: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Start a stopped container
     pub fn start_container(container_name: &str, runtime: &str) -> Result<()> {
         let output = Command::new(runtime)

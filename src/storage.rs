@@ -101,6 +101,25 @@ impl ProjectData {
         self.containers.insert(name.to_string(), info);
     }
 
+    /// Get a mutable reference to a container by name (or default if name is None)
+    pub fn get_container_mut(&mut self, name: Option<&str>) -> Result<&mut ContainerInfo> {
+        let container_name = name.unwrap_or(&self.default).to_string();
+
+        if !self.containers.contains_key(&container_name) {
+            return Err(ClaudepodError::ContainerNotFound(format!(
+                "Container '{}' not found. Available containers: {}",
+                container_name,
+                if self.containers.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.containers.keys().cloned().collect::<Vec<_>>().join(", ")
+                }
+            )));
+        }
+
+        Ok(self.containers.get_mut(&container_name).unwrap())
+    }
+
     /// Remove a container by name
     pub fn remove_container(&mut self, name: &str) -> Option<ContainerInfo> {
         self.containers.remove(name)
