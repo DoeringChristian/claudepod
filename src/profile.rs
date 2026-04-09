@@ -218,7 +218,7 @@ fn default_command() -> String {
 }
 
 fn default_nodejs_version() -> String {
-    "18".to_string()
+    "22".to_string()
 }
 
 fn default_nodejs_source() -> String {
